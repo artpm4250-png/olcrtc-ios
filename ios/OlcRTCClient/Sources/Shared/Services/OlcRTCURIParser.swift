@@ -29,6 +29,7 @@ public struct OlcRTCURIParser {
         case unknownTransport(String)
         case malformedTransportPayload(String)
         case emptyField(String)
+        case invalidKeyHex(String)
 
         public var description: String {
             switch self {
@@ -48,6 +49,12 @@ public struct OlcRTCURIParser {
                 return "Malformed transport payload: \(value)"
             case .emptyField(let field):
                 return "Empty field: \(field)"
+            case .invalidKeyHex(let value):
+                // Do NOT include the raw key in the error message — it
+                // could end up in a log even after sanitization if a
+                // caller stringifies the error eagerly. Only the length
+                // is safe to surface.
+                return "Encryption key must be 64 hex characters (got \(value.count))."
             }
         }
     }
@@ -105,13 +112,30 @@ public struct OlcRTCURIParser {
         if roomPart.isEmpty { throw ParseError.emptyField("RoomID") }
         if keyPart.isEmpty { throw ParseError.emptyField("EncryptionKey") }
 
+        // Validate the key shape up-front so a malformed URI fails the
+        // import instead of producing a profile the validator would
+        // later reject anyway. We tolerate either case (the spec is
+        // silent) but normalize to lowercase so persisted profiles are
+        // canonical.
+        let normalizedKey = keyPart.lowercased()
+        guard ProfileValidator.isValidKeyHex(normalizedKey) else {
+            throw ParseError.invalidKeyHex(keyPart)
+        }
+
+        // Percent-decode room and MIMO so URIs that legitimately carry
+        // URL characters (e.g. a jitsi URL room with `?roomID=...` or a
+        // MIMO comment with spaces) round-trip cleanly. We do NOT
+        // percent-decode the key — it is hex by definition.
+        let decodedRoom = roomPart.removingPercentEncoding ?? roomPart
+        let decodedMimo = mimoPart.flatMap { $0.removingPercentEncoding } ?? mimoPart
+
         return Parsed(
             provider: provider,
             transport: transport,
             transportPayload: payload,
-            roomID: roomPart,
-            keyHex: keyPart,
-            mimo: mimoPart
+            roomID: decodedRoom,
+            keyHex: normalizedKey,
+            mimo: decodedMimo
         )
     }
 
@@ -161,16 +185,22 @@ public struct OlcRTCURIParser {
 
 public extension OlcRTCURIParser.Parsed {
     /// Materialize a profile from a parsed URI. The caller supplies a
-    /// display name (the URI format itself does not carry one).
-    func toProfile(name: String) -> OlcRTCProfile {
+    /// default display name (the URI format itself does not carry one,
+    /// but `$<MIMO>` is conventionally used as a human-readable
+    /// description and is therefore preferred when present).
+    func toProfile(name defaultName: String) -> OlcRTCProfile {
+        let trimmedMimo = mimo?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let displayName = trimmedMimo.isEmpty ? defaultName : trimmedMimo
+
         var profile = OlcRTCProfile(
-            name: name,
+            name: displayName,
             provider: provider,
             transport: transport,
             roomID: roomID,
             clientID: "",
             keyHex: keyHex,
-            mimo: mimo
+            mimo: trimmedMimo.isEmpty ? nil : trimmedMimo
         )
         if transport == .vp8channel {
             if let fps = transportPayload["vp8-fps"].flatMap(Int.init) {

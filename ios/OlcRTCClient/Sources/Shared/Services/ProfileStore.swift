@@ -42,6 +42,41 @@ public final class ProfileStore {
         }
     }
 
+    /// Treat two profiles as "the same connection" when the tuple of
+    /// (provider, transport, roomID, keyHex, clientID) matches. Used by
+    /// import flows to avoid stacking duplicates when the user imports
+    /// the same `olcrtc://` URI or subscription twice. We deliberately
+    /// do NOT match on `name`, `socksPort`, `dnsServer`, etc. — those
+    /// are local-display / local-runtime knobs the user is allowed to
+    /// customize.
+    public static func isDuplicate(_ a: OlcRTCProfile, _ b: OlcRTCProfile) -> Bool {
+        a.provider == b.provider
+            && a.transport == b.transport
+            && a.roomID == b.roomID
+            && a.keyHex == b.keyHex
+            && a.clientID == b.clientID
+    }
+
+    /// Returns a list with `candidates` appended, skipping any candidate
+    /// that is already present per `isDuplicate`. Order preserved.
+    public static func mergingWithoutDuplicates(
+        existing: [OlcRTCProfile],
+        adding candidates: [OlcRTCProfile]
+    ) -> (merged: [OlcRTCProfile], addedCount: Int, duplicateCount: Int) {
+        var merged = existing
+        var added = 0
+        var dup = 0
+        for candidate in candidates {
+            if merged.contains(where: { isDuplicate($0, candidate) }) {
+                dup += 1
+            } else {
+                merged.append(candidate)
+                added += 1
+            }
+        }
+        return (merged, added, dup)
+    }
+
     private func storageURL() -> URL? {
         let fm = FileManager.default
         guard let dir = try? fm.url(

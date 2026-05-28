@@ -3,7 +3,7 @@ import SwiftUI
 
 @MainActor
 final class AppState: ObservableObject {
-    @Published var mode: ConnectionMode = .vpn
+    @Published var mode: ConnectionMode = .localProxy
     @Published var status: TunnelStatus = .disconnected
 
     @Published var provider: OlcRTCProvider = .jitsi
@@ -21,8 +21,20 @@ final class AppState: ObservableObject {
     @Published var logLines: [String] = LogsView.placeholderLogs()
     @Published var lastError: String?
 
+    // Most recently selected profile id (for UI selection state).
+    @Published var selectedProfileID: UUID?
+
+    // Live validation issues for the Connect form. Recomputed every time
+    // a relevant field changes via `refreshValidation()`. Views read
+    // this directly to render inline errors and disable the Start
+    // button.
+    @Published private(set) var validationIssues: [ProfileValidator.Issue] = []
+
     private let store = ProfileStore.shared
     private let sanitizer = LogSanitizer()
+    private let validator = ProfileValidator()
+    private let subscriptionImporter = SubscriptionImporter()
+
     #if !canImport(OlcRTCMobile)
     private let mock = MockOlcRTCService()
     #endif
@@ -38,6 +50,7 @@ final class AppState: ObservableObject {
 
     init() {
         profiles = store.load()
+        refreshValidation()
     }
 
     func currentProfile() -> OlcRTCProfile {
@@ -45,18 +58,54 @@ final class AppState: ObservableObject {
             name: "ad-hoc",
             provider: provider,
             transport: transport,
-            roomID: roomID,
-            clientID: clientID,
-            keyHex: keyHex,
-            socksHost: socksHost,
-            socksPort: Int(socksPort) ?? 8808,
+            roomID: roomID.trimmingCharacters(in: .whitespacesAndNewlines),
+            clientID: clientID.trimmingCharacters(in: .whitespacesAndNewlines),
+            keyHex: keyHex.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+            socksHost: socksHost.trimmingCharacters(in: .whitespacesAndNewlines),
+            socksPort: Int(socksPort.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 8808,
             dnsServer: dnsServer,
             debug: debug
         )
     }
 
+    /// Re-run profile validation against the current form fields and
+    /// publish the result. Cheap (~O(field count)); fine to call on
+    /// every change.
+    func refreshValidation() {
+        validationIssues = validator.validate(
+            provider: provider.rawValue,
+            transport: transport.rawValue,
+            roomID: roomID,
+            clientID: clientID,
+            keyHex: keyHex,
+            socksHost: socksHost,
+            socksPortString: socksPort,
+            dnsServer: dnsServer
+        )
+    }
+
+    /// True when the form is in a state where `Start` should be enabled.
+    /// We only require validation to be green; `status.isActive` is
+    /// handled separately at the call site.
+    var canStart: Bool { validationIssues.isEmpty }
+
+    /// Convenience: the first validation message for a given field, or
+    /// nil if that field is currently valid. Used to render inline
+    /// errors next to each Form row.
+    func validationMessage(for field: ProfileValidator.Field) -> String? {
+        validationIssues.first { $0.field == field }?.message
+    }
+
     func start() async {
         lastError = nil
+        refreshValidation()
+        guard canStart else {
+            let first = validationIssues.first?.message ?? "Profile is invalid."
+            status = .failed(reason: first)
+            lastError = first
+            appendLog("Start refused: \(first)")
+            return
+        }
         status = .starting
         appendLog("Starting in \(mode.displayName)…")
         do {
@@ -91,10 +140,14 @@ final class AppState: ObservableObject {
     }
 
     func check() {
-        appendLog("Check: profile fields validation is a stub in this scaffold.")
-        if roomID.isEmpty { lastError = "Room ID is empty" }
-        else if keyHex.isEmpty { lastError = "Encryption key is empty" }
-        else { lastError = nil; appendLog("Check OK (stub).") }
+        refreshValidation()
+        if let first = validationIssues.first {
+            lastError = first.message
+            appendLog("Check failed: \(first)")
+        } else {
+            lastError = nil
+            appendLog("Check OK — profile fields are well-formed (does not verify reachability).")
+        }
     }
 
     func ping() async {
@@ -111,18 +164,160 @@ final class AppState: ObservableObject {
         #endif
     }
 
-    func handleIncomingURL(_ url: URL) {
-        guard url.scheme == "olcrtc" else { return }
-        do {
-            let parsed = try OlcRTCURIParser().parse(url.absoluteString)
-            let profile = parsed.toProfile(name: "Imported")
-            profiles.append(profile)
-            try? store.save(profiles)
-            appendLog("Imported profile from olcrtc:// URI (key masked).")
-        } catch {
-            appendLog("URI import failed: \(error.localizedDescription)")
+    // MARK: - Profile management
+
+    /// Save the current Connect-form state as a named profile.
+    /// Re-uses an existing entry when the connection key fields match
+    /// (provider+transport+roomID+keyHex+clientID), so a user editing a
+    /// profile in-place does not produce a stack of near-duplicates.
+    @discardableResult
+    func saveCurrentProfile(name: String) -> Bool {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else {
+            lastError = "Profile name is required."
+            return false
+        }
+        refreshValidation()
+        guard canStart else {
+            lastError = validationIssues.first?.message ?? "Profile is invalid."
+            return false
+        }
+        var candidate = currentProfile()
+        candidate.name = trimmedName
+
+        if let idx = profiles.firstIndex(where: { ProfileStore.isDuplicate($0, candidate) }) {
+            // Preserve the original id so SwiftUI doesn't lose selection.
+            candidate.id = profiles[idx].id
+            profiles[idx] = candidate
+        } else {
+            profiles.append(candidate)
+        }
+        persistProfiles()
+        selectedProfileID = candidate.id
+        appendLog("Saved profile '\(trimmedName)'.")
+        return true
+    }
+
+    /// Replace the Connect-form fields with a saved profile.
+    func selectProfile(_ profile: OlcRTCProfile) {
+        provider = profile.provider
+        transport = profile.transport
+        roomID = profile.roomID
+        clientID = profile.clientID
+        keyHex = profile.keyHex
+        socksHost = profile.socksHost
+        socksPort = String(profile.socksPort)
+        dnsServer = profile.dnsServer
+        debug = profile.debug
+        selectedProfileID = profile.id
+        refreshValidation()
+        appendLog("Selected profile '\(profile.name)'.")
+    }
+
+    func deleteProfile(_ profile: OlcRTCProfile) {
+        profiles.removeAll { $0.id == profile.id }
+        if selectedProfileID == profile.id { selectedProfileID = nil }
+        persistProfiles()
+        appendLog("Deleted profile '\(profile.name)'.")
+    }
+
+    func deleteProfiles(at offsets: IndexSet) {
+        let removed = offsets.compactMap { profiles.indices.contains($0) ? profiles[$0] : nil }
+        profiles.remove(atOffsets: offsets)
+        for p in removed where selectedProfileID == p.id { selectedProfileID = nil }
+        persistProfiles()
+        if !removed.isEmpty {
+            appendLog("Deleted \(removed.count) profile(s).")
         }
     }
+
+    // MARK: - Import
+
+    /// Handle `olcrtc://` URIs delivered via `onOpenURL`.
+    func handleIncomingURL(_ url: URL) {
+        guard url.scheme?.lowercased() == "olcrtc" else { return }
+        let importedCount = importURI(url.absoluteString)
+        if importedCount == 0 {
+            // Concrete error already logged + surfaced by importURI.
+            return
+        }
+        appendLog("Imported \(importedCount) profile(s) from olcrtc:// URI.")
+    }
+
+    /// Import a single `olcrtc://` URI string. Returns the number of
+    /// profiles added (0 or 1). Sets `lastError` on failure. Never logs
+    /// the raw URI or the key.
+    @discardableResult
+    func importURI(_ raw: String) -> Int {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            lastError = "URI is empty."
+            return 0
+        }
+        do {
+            let parsed = try OlcRTCURIParser().parse(trimmed)
+            let candidate = parsed.toProfile(name: "Imported")
+            let (merged, added, dup) = ProfileStore.mergingWithoutDuplicates(
+                existing: profiles,
+                adding: [candidate]
+            )
+            profiles = merged
+            persistProfiles()
+            if added > 0 {
+                lastError = nil
+                appendLog("URI import: 1 profile added (key masked).")
+                return 1
+            } else if dup > 0 {
+                lastError = "URI already imported."
+                appendLog("URI import: 0 added, 1 duplicate.")
+                return 0
+            }
+            return 0
+        } catch let parseError as OlcRTCURIParser.ParseError {
+            lastError = parseError.description
+            appendLog("URI import failed: \(parseError.description)")
+            return 0
+        } catch {
+            lastError = error.localizedDescription
+            appendLog("URI import failed: \(error.localizedDescription)")
+            return 0
+        }
+    }
+
+    /// Fetch a subscription URL and merge any well-formed lines as
+    /// profiles. Async because the fetch goes over the network.
+    @discardableResult
+    func importSubscription(urlString: String) async -> SubscriptionImporter.Outcome? {
+        let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            lastError = "Subscription URL is empty."
+            return nil
+        }
+        appendLog("Subscription import: fetching \(trimmed)…")
+        do {
+            let outcome = try await subscriptionImporter.fetch(urlString: trimmed)
+            let (merged, added, dup) = ProfileStore.mergingWithoutDuplicates(
+                existing: profiles,
+                adding: outcome.imported
+            )
+            profiles = merged
+            persistProfiles()
+            lastError = nil
+            appendLog(
+                "Subscription import done: \(added) added, \(dup) duplicate, \(outcome.skippedCount) skipped."
+            )
+            for reason in outcome.skippedReasons.prefix(10) {
+                appendLog("  · \(reason)")
+            }
+            return outcome
+        } catch {
+            lastError = error.localizedDescription
+            appendLog("Subscription import failed: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    // MARK: - Logs
 
     func appendLog(_ raw: String) {
         let line = sanitizer.sanitize(raw)
@@ -133,5 +328,18 @@ final class AppState: ObservableObject {
 
     func clearLogs() {
         logLines.removeAll()
+    }
+
+    // MARK: - Helpers
+
+    private func persistProfiles() {
+        do {
+            try store.save(profiles)
+        } catch {
+            // Persist failure is not fatal to the UI session — surface
+            // it but keep the in-memory copy.
+            lastError = "Persist failed: \(error.localizedDescription)"
+            appendLog("Persist failed: \(error.localizedDescription)")
+        }
     }
 }

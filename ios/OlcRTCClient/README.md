@@ -18,11 +18,56 @@ before changing anything here.
   it exists as a real extension target but does **not** pretend the
   tunnel works yet. The Go runtime will be wired in a later step.
 - **`Sources/Shared/`** — Swift sources compiled into both targets
-  (models, URI parser, profile store, log sanitizer). Convenient for
-  the scaffold stage; once we have real cross-target data flow, this
-  may be promoted to its own framework target.
-- **`Tests/OlcRTCClientTests/`** — unit tests for the parser and the
-  log sanitizer.
+  (models, URI parser, profile store, profile validator,
+  subscription importer, log sanitizer). Convenient for the
+  scaffold stage; once we have real cross-target data flow, this may
+  be promoted to its own framework target.
+- **`Tests/OlcRTCClientTests/`** — unit tests for the URI parser, the
+  profile validator, the subscription importer, and the log
+  sanitizer.
+
+## UI usage (Local Proxy MVP)
+
+The app has four tabs. Today only **Local Proxy Mode** is wired to a
+real runtime; **VPN Mode** is a scaffold/stub and is labelled as such
+in the UI.
+
+- **Connect** — pick the mode, fill the profile fields (provider,
+  transport, room ID, client ID, encryption key, SOCKS host/port,
+  DNS, debug), and press **Start**. Inline validation runs on every
+  field change; the **Start** button is disabled until the profile is
+  valid. Validation rules:
+  - provider ∈ {`jitsi`, `telemost`, `wbstream`},
+  - transport ∈ {`datachannel`, `vp8channel`},
+  - room ID and client ID must not be empty,
+  - encryption key must be exactly 64 hex characters,
+  - SOCKS port must be a number in `1…65535`.
+- **Save as profile…** on the Connect tab stores the current form as
+  a named profile. Profiles with the same
+  (provider, transport, room, key, client ID) tuple are treated as
+  duplicates and updated in place rather than appended.
+- **Profiles** — list of saved profiles. Tap to load into the
+  Connect form. Swipe-to-delete (or use Edit → Delete). The toolbar
+  `+` menu offers two import flows:
+  - **Import olcrtc:// URI** — paste a single
+    `olcrtc://<provider>?<transport>@<room>#<key>$<mimo>` URI.
+    Percent-encoded room and MIMO fields are decoded; the `$<mimo>`
+    suffix is used as the profile's display name when present. The
+    full URI and the key are never written to logs.
+  - **Import subscription URL** — paste an `http://` or `https://`
+    URL pointing to a plain-text subscription. Each non-empty line
+    is parsed as a separate `olcrtc://` URI; lines starting with `#`
+    are treated as comments and skipped; invalid lines are skipped
+    with a sanitized reason (line number + structured error, never
+    the raw line). The sheet shows an "X imported, Y skipped"
+    summary after each import.
+- **Logs** — running, sanitized log buffer. `LogSanitizer` masks
+  64-char hex keys, full `olcrtc://` URIs, and `keyHex=` /
+  `password=` style key/value pairs before they reach this view.
+  The toolbar has **Copy** (copy all log lines to the pasteboard)
+  and **Clear** (drop the in-memory log buffer).
+- **About** — explicitly distinguishes Local Proxy Mode (wired) from
+  VPN Mode (scaffold/stub), and explains the unsigned-IPA caveats.
 
 ## `OlcRTCMobile.xcframework` is generated, never committed
 

@@ -9,6 +9,122 @@ Date format: `YYYY-MM-DD`. Each entry should answer **what** changed and
 
 ---
 
+### 2026-05-28 — Harden profile import and Local Proxy MVP UX
+
+- Goal: make the Connect / Profiles / Logs / About surface actually
+  usable for configuring Local Proxy Mode against a real olcRTC
+  endpoint. Audit found: validation was a one-liner stub, Start was
+  enabled with empty/garbage fields, the Profiles tab was read-only,
+  there was no subscription importer at all, the URI parser did not
+  percent-decode and did not enforce the 64-char hex key requirement,
+  and the About copy still described the app as a generic "VPN
+  client" without making the Local Proxy = wired / VPN Mode = stub
+  distinction obvious to a first-time user. UI-only step — no Go
+  core change, no gomobile wired into `PacketTunnelProvider`, no
+  signing, no new CI workflow.
+- Shared layer changes (compiled into both app and extension; only
+  app uses them today, but extension keeps building under
+  `APPLICATION_EXTENSION_API_ONLY = YES` because all new code is
+  pure Foundation):
+  - **New `ProfileValidator`** (`Sources/Shared/Services/`). Pure
+    validator, no I/O. Enforces the rules from the task brief:
+    provider ∈ `{jitsi, telemost, wbstream}`, transport ∈
+    `{datachannel, vp8channel}`, room/clientID non-empty after trim,
+    `keyHex` exactly 64 hex chars (lower or upper case), SOCKS host
+    non-empty, SOCKS port parseable into `1...65535`. DNS server
+    stays an optional free-form string until the Go core surfaces a
+    canonical format. Returns `[Issue]` (field + message) instead of
+    throwing on the first miss so the UI shows every problem at
+    once.
+  - **New `SubscriptionImporter`** (`Sources/Shared/Services/`).
+    Fetches an `http://` / `https://` URL with an ephemeral
+    `URLSession` (15 s request timeout, no cookies, no cache),
+    decodes the body as UTF-8 with a Latin-1 fallback, splits on
+    newlines, treats `#`-prefixed lines as comments, and runs each
+    remaining line through `OlcRTCURIParser`. Invalid lines are
+    skipped (not fatal); the returned `Outcome` carries the imported
+    profile array, a skipped count, and per-line skipped reasons.
+    Skipped reasons never include the raw line or the key — only the
+    line number plus the structured `ParseError.description` (length
+    of the bad key when relevant; never the bytes).
+  - **`OlcRTCURIParser` hardened**: percent-decodes `roomID` and
+    `mimo` (so jitsi-style room URLs with `%20` and MIMO comments
+    with `%2F` round-trip cleanly); validates the encryption key as
+    exactly 64 hex characters at parse time and normalizes it to
+    lowercase; new `ParseError.invalidKeyHex(String)` case that
+    surfaces only the length, never the value;
+    `Parsed.toProfile(name:)` uses the trimmed MIMO as the profile's
+    display name when present, falling back to the caller-supplied
+    name otherwise.
+  - **`ProfileStore` extended** with `isDuplicate(_:_:)` and
+    `mergingWithoutDuplicates(existing:adding:)` helpers. Duplicate
+    test is the (provider, transport, room, key, clientID) tuple —
+    `name`, SOCKS port, DNS, etc. are local knobs and don't count.
+- App-layer changes:
+  - **`AppState` rewrite**: default mode is now `.localProxy` (it's
+    the only mode wired to a real runtime); `currentProfile()`
+    trims whitespace and lowercases the key before forwarding; new
+    `validationIssues` array with `refreshValidation()` hooked onto
+    every field's `onChange`; new `canStart` /
+    `validationMessage(for:)` helpers consumed by the views; `start()`
+    refuses to start when invalid (sets `status = .failed(reason:)`
+    + `lastError`); `check()` is now a real validation report instead
+    of a stub; new `saveCurrentProfile(name:)`, `selectProfile(_:)`,
+    `deleteProfile(_:)`, `deleteProfiles(at:)`, `importURI(_:)`,
+    `importSubscription(urlString:)`; `handleIncomingURL` reuses
+    `importURI` so deep links go through the same dedup/sanitize
+    path; logs continue to flow through `LogSanitizer`.
+  - **`ConnectView`** shows inline red error rows under each field
+    when the validator flags it, disables `Start` when validation
+    fails, and gains a `Save as profile…` button + sheet for naming
+    the current form-state and persisting it.
+  - **`ProfilesView`** is no longer read-only: tap to load a profile
+    into the Connect form, swipe-to-delete, toolbar `+` menu with
+    `Import olcrtc:// URI` and `Import subscription URL` sheets.
+    Empty state offers the same two import buttons.
+  - **`AboutView`** copy split into "Local Proxy Mode (wired)" vs
+    "VPN Mode (scaffold / stub)" sections so the difference is
+    obvious without scrolling to the bottom; unsigned-IPA disclaimer
+    now references the artifact by its actual CI name.
+  - **`LogsView` placeholder lines** updated to reflect today's
+    reality (Local Proxy wired / VPN stub) instead of the older
+    "gomobile bridge not linked yet" wording.
+- New / extended tests (run under the existing
+  `Run tests (iphonesimulator)` step in
+  `iOS App + Gomobile Build`):
+  - `OlcRTCURIParserTests` — new cases for the canonical
+    jitsi/datachannel and wbstream/vp8channel URIs, percent-decoded
+    room + MIMO, short key rejection, non-hex key rejection,
+    unsupported provider (`zoom`) and unsupported transport
+    (`webrtc`), a jitsi URL room containing `?id=42` (must still
+    split on the last `#`), uppercase key normalization to
+    lowercase.
+  - New `ProfileValidatorTests` — fully-valid input, unknown
+    provider, unknown transport, empty room + empty clientID, short
+    key, non-hex key, uppercase-accepted key, bad ports (`""`,
+    `"0"`, `"65536"`, `"abc"`, `"-1"`, `"8.8"`), boundary ports
+    (`"1"`, `"65535"`, `"8080"`).
+  - New `SubscriptionImporterTests` — multiple valid lines, comment
+    + blank-line filtering, mixed valid + invalid lines (valid ones
+    survive), empty-body case. Each test that exercises a "skipped"
+    path also asserts the skipped reason does **not** contain the
+    raw key or the raw `olcrtc://` URI.
+- Documentation:
+  - `ios/OlcRTCClient/README.md` gained a **UI usage (Local Proxy
+    MVP)** section walking the Connect / Profiles / Logs / About
+    tabs, the validation rules, and the URI / subscription import
+    flows. Repeats the privacy guarantees (no key, no full URI, no
+    raw subscription line written to logs).
+- **Not done in this step**, intentionally: any Go-core change; any
+  wiring of `OlcRTCMobile.xcframework` into the
+  `PacketTunnelProvider` extension; any real
+  `NETunnelProviderManager` install; any signing; any new feature
+  beyond what the task brief listed; any change to the IPA
+  packaging or workflow YAML (the new tests run inside the
+  pre-existing `Run tests` step, no workflow edit needed).
+
+---
+
 ### 2026-05-28 — Validate unsigned IPA artifact structure
 
 - Goal: lock in the IPA layout produced by

@@ -41,9 +41,9 @@ struct LogsView: View {
 
     static func placeholderLogs() -> [String] {
         [
-            "[boot] olcRTC iOS client scaffold loaded",
-            "[boot] log sanitization is active: keyHex=<masked> by LogSanitizer",
-            "[boot] gomobile bridge is not linked yet — service calls are stubs",
+            "[boot] olcRTC iOS client loaded",
+            "[boot] log sanitization is active: keyHex/URIs/secrets are masked by LogSanitizer",
+            "[boot] Local Proxy Mode is wired to OlcRTCMobile.xcframework; VPN Mode is scaffold/stub",
         ]
     }
 }
