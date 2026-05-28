@@ -24,10 +24,35 @@ before changing anything here.
 - **`Tests/OlcRTCClientTests/`** — unit tests for the parser and the
   log sanitizer.
 
+## `OlcRTCMobile.xcframework` is generated, never committed
+
+The Go core is consumed via the `third_party/olcrtc` submodule and
+turned into `OlcRTCMobile.xcframework` by
+[`scripts/build-gomobile-ios.sh`](../../scripts/build-gomobile-ios.sh)
+(invoked locally on a Mac or on a macOS CI runner). The framework
+lands at:
+
+```
+ios/OlcRTCClient/Frameworks/OlcRTCMobile.xcframework
+```
+
+That path is **ignored by `.gitignore`** and must not be committed.
+It is produced fresh on every CI run by the
+[`Gomobile iOS Bind`](../../.github/workflows/gomobile-ios-bind.yml)
+workflow, which uploads it as a workflow artifact for inspection. The
+companion [`iOS Scaffold Build`](../../.github/workflows/ios-scaffold.yml)
+workflow builds the Swift app **without** the framework today
+(MockOlcRTCService stands in); wiring the framework into both iOS
+targets is a separate later step (see ADR-0001 and the "Next" section
+of [`docs/ai/TASK_LOG.md`](../../docs/ai/TASK_LOG.md)).
+
 ## What is **not** here today
 
-- No gomobile-built `OlcRTCMobile.xcframework`. See ADR-0001.
-- No GitHub Actions workflow. See the "Next" section of
+- No gomobile-built `OlcRTCMobile.xcframework` checked in. See
+  ADR-0001 and the section above — the framework is built by CI /
+  the bind script and consumed from a gitignored path.
+- The framework is not yet wired into `project.yml` or referenced
+  from the app / extension targets. See the "Next" section of
   [`docs/ai/TASK_LOG.md`](../../docs/ai/TASK_LOG.md).
 - No code signing identity, no real provisioning profile, no real
   `NetworkExtension` entitlement values. The `.entitlements` files

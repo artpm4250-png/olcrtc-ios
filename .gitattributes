@@ -1,0 +1,9 @@
+# Force LF line endings on files that must run on Unix-like systems
+# (macOS CI runners), even when this repo is checked out on Windows.
+# Without this, Git on Windows rewrites them to CRLF on checkout and
+# `/usr/bin/env bash` fails with "bad interpreter" because of the `\r`.
+
+*.sh         text eol=lf
+*.yml        text eol=lf
+*.yaml       text eol=lf
+Makefile     text eol=lf

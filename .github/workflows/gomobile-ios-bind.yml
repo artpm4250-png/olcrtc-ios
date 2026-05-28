@@ -1,0 +1,62 @@
+name: Gomobile iOS Bind
+
+# Isolated gomobile bind verification for the iOS client.
+#
+# This workflow ONLY validates that `OlcRTCMobile.xcframework` can be
+# built from the upstream Go core (consumed as the
+# `third_party/olcrtc` submodule). It does NOT integrate the framework
+# into the Xcode project, does NOT build the Swift app, and does NOT
+# produce an IPA. See `scripts/build-gomobile-ios.sh` and
+# ADR-0001 / ADR-0011 in `docs/ai/DECISIONS.md`.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "scripts/build-gomobile-ios.sh"
+      - ".github/workflows/gomobile-ios-bind.yml"
+      - ".gitmodules"
+      - "third_party/olcrtc"
+      - "docs/ai/**"
+
+jobs:
+  bind:
+    name: Gomobile Bind
+    runs-on: macos-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Submodule status
+        run: git submodule status --recursive
+
+      # Use the Go version requested by the upstream go.mod. If that
+      # version is not available on the runner, setup-go fails — we
+      # surface that error and stop, per the task brief. Do NOT
+      # silently downgrade and do NOT edit upstream go.mod here.
+      - name: Setup Go (from third_party/olcrtc/go.mod)
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: third_party/olcrtc/go.mod
+          cache: false
+
+      - name: Print Go version
+        run: go version
+
+      - name: Go test ./mobile (upstream core)
+        working-directory: third_party/olcrtc
+        run: go test -count=1 ./mobile
+
+      - name: Build OlcRTCMobile.xcframework
+        run: scripts/build-gomobile-ios.sh
+
+      - name: Upload OlcRTCMobile.xcframework artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OlcRTCMobile-xcframework
+          path: ios/OlcRTCClient/Frameworks/OlcRTCMobile.xcframework
+          if-no-files-found: error
