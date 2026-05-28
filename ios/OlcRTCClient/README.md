@@ -50,12 +50,39 @@ step once `APPLICATION_EXTENSION_API_ONLY` compatibility is validated
 (see the "Next" section of
 [`docs/ai/TASK_LOG.md`](../../docs/ai/TASK_LOG.md)).
 
+## Unsigned IPA artifact (CI only)
+
+The
+[`iOS App + Gomobile Build`](../../.github/workflows/ios-app-gomobile.yml)
+workflow now packages the Release `iphoneos` `.app` bundle into an
+**unsigned** `.ipa` archive and uploads it as a workflow artifact:
+
+- Artifact name: `OlcRTCClient-unsigned-ipa`
+- Archive path inside the run: `build/ipa/OlcRTCClient-unsigned.ipa`
+- Structure: a plain zip containing
+  `Payload/OlcRTCClient.app/...`, no `_CodeSignature/`, no embedded
+  provisioning profile.
+
+This IPA exists strictly as a **CI / later-signing artifact**. It is
+**not** expected to install or run a VPN on an ordinary iPhone. Real
+on-device install — and especially VPN Mode runtime through the
+`PacketTunnelProvider` extension — requires all of:
+
+- a paid Apple Developer account;
+- a provisioning profile scoped to the
+  `PacketTunnelProvider` extension's bundle ID;
+- the `com.apple.developer.networking.networkextension` entitlement;
+- a signed build with that profile and entitlement attached.
+
+None of those are configured in this repository today (see
+ADR-0008). The artifact is meant to be consumed by a later signed-build
+pipeline that re-signs and re-packages it, not to be sideloaded onto a
+random device.
+
 ## What is **not** here today
 
 - The framework is not yet wired into `PacketTunnelProvider`. VPN Mode
   is still a compile-time stub.
-- No unsigned `.ipa` packaging yet. See the "Next" section of
-  [`docs/ai/TASK_LOG.md`](../../docs/ai/TASK_LOG.md).
 - No code signing identity, no real provisioning profile, no real
   `NetworkExtension` entitlement values. The `.entitlements` files
   under `Sources/App/` and `Sources/PacketTunnelProvider/` are kept in

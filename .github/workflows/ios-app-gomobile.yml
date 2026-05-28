@@ -98,6 +98,7 @@ jobs:
             -configuration Debug \
             -sdk iphonesimulator \
             -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build/DerivedData \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
@@ -111,6 +112,7 @@ jobs:
             -configuration Debug \
             -sdk iphonesimulator \
             -destination "${IOS_SIMULATOR_DESTINATION}" \
+            -derivedDataPath build/DerivedData \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
@@ -124,7 +126,57 @@ jobs:
             -configuration Release \
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
+            -derivedDataPath build/DerivedData \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             build
+
+      - name: Locate built .app
+        run: |
+          # Deterministic location thanks to -derivedDataPath above.
+          # Print what is actually there so a future drift in Xcode's
+          # output layout is obvious from the workflow log.
+          find build/DerivedData/Build/Products/Release-iphoneos -maxdepth 2 -type d -name "*.app" -print
+          ls -la build/DerivedData/Build/Products/Release-iphoneos || true
+
+      - name: Validate .app bundle before packaging
+        run: |
+          set -euo pipefail
+          APP_PATH="build/DerivedData/Build/Products/Release-iphoneos/OlcRTCClient.app"
+          if [ ! -d "$APP_PATH" ]; then
+            echo "ERROR: app bundle not found at $APP_PATH" >&2
+            exit 1
+          fi
+          if [ ! -f "$APP_PATH/Info.plist" ]; then
+            echo "ERROR: Info.plist not found inside $APP_PATH" >&2
+            exit 1
+          fi
+          if [ ! -f "$APP_PATH/OlcRTCClient" ]; then
+            echo "ERROR: app binary not found at $APP_PATH/OlcRTCClient" >&2
+            exit 1
+          fi
+          echo "OK: $APP_PATH validated (Info.plist + binary present)"
+
+      - name: Package unsigned IPA
+        run: |
+          set -euo pipefail
+          APP_PATH="build/DerivedData/Build/Products/Release-iphoneos/OlcRTCClient.app"
+          mkdir -p build/ipa/Payload
+          # -R: copy recursively, preserving the bundle directory.
+          cp -R "$APP_PATH" build/ipa/Payload/OlcRTCClient.app
+          # An IPA is just a zip with a top-level Payload/ directory.
+          # Zip from inside build/ipa so the archive entries are
+          # `Payload/OlcRTCClient.app/...` and not
+          # `build/ipa/Payload/OlcRTCClient.app/...`.
+          cd build/ipa
+          zip -qry OlcRTCClient-unsigned.ipa Payload
+          ls -la OlcRTCClient-unsigned.ipa
+          unzip -l OlcRTCClient-unsigned.ipa | head -n 20
+
+      - name: Upload unsigned IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OlcRTCClient-unsigned-ipa
+          path: build/ipa/OlcRTCClient-unsigned.ipa
+          if-no-files-found: error
