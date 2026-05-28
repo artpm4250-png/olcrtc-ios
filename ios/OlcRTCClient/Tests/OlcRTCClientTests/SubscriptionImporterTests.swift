@@ -33,10 +33,14 @@ final class SubscriptionImporterTests: XCTestCase {
     }
 
     func test_skipsInvalidLines_butKeepsValidOnes() {
+        // Use a "raw line" sentinel that is clearly not a hex key and
+        // clearly not a real URI prefix, so we can assert that the raw
+        // line itself never leaks into the skipped reasons.
+        let rawLineSentinel = "this-is-not-a-uri-at-all-SENTINEL"
         let body = """
         olcrtc://wbstream?datachannel@room-01#\(validKey64)
         olcrtc://zoom?datachannel@room-02#\(validKey64)
-        this is not a uri at all
+        \(rawLineSentinel)
         olcrtc://jitsi?datachannel@room-03#deadbeef
         olcrtc://wbstream?vp8channel@room-04#\(validKey64)
         """
@@ -44,15 +48,29 @@ final class SubscriptionImporterTests: XCTestCase {
         XCTAssertEqual(outcome.imported.count, 2,
             "expected 2 imported (room-01, room-04), got \(outcome.imported.map(\.roomID))")
         XCTAssertEqual(outcome.skippedCount, 3)
-        // Skipped reasons must NOT contain the raw key or the raw URI.
+        // Skipped reasons must NOT contain:
+        //   - the encryption key bytes from any of the input lines,
+        //   - the raw line that was rejected (the sentinel),
+        //   - the raw room ID from the invalid lines (room-02, room-03).
+        // (`olcrtc://` as a *literal* in the error rule explanation
+        // ("URI must start with olcrtc://") is fine — it does not
+        // identify any specific user-supplied line.)
         for reason in outcome.skippedReasons {
             XCTAssertFalse(
                 reason.contains(validKey64),
                 "skipped reason leaked the encryption key: \(reason)"
             )
             XCTAssertFalse(
-                reason.contains("olcrtc://"),
-                "skipped reason leaked a raw olcrtc:// URI: \(reason)"
+                reason.contains(rawLineSentinel),
+                "skipped reason leaked the raw line content: \(reason)"
+            )
+            XCTAssertFalse(
+                reason.contains("room-02"),
+                "skipped reason leaked a parsed roomID: \(reason)"
+            )
+            XCTAssertFalse(
+                reason.contains("room-03"),
+                "skipped reason leaked a parsed roomID: \(reason)"
             )
         }
     }
