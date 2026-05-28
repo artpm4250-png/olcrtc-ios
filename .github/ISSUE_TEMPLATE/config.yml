@@ -1,11 +1,11 @@
 blank_issues_enabled: false
 contact_links:
-  - name: Чат сообщества (Telegram)
-    url: https://t.me/openlibrecommunity
-    about: Общие вопросы, помощь по запуску, обсуждения. Перед созданием issue загляни сюда.
-  - name: Документация
-    url: https://github.com/openlibrecommunity/olcrtc/tree/main/docs
-    about: Конфигурация, быстрый старт, формат URI, примеры YAML.
-  - name: olcbox (UI клиент)
-    url: https://github.com/alananisimov/olcbox/issues
-    about: Баги интерфейса/мобильного клиента сообщай туда, ядро olcrtc их не чинит.
+  - name: Upstream olcRTC core
+    url: https://github.com/openlibrecommunity/olcrtc/issues
+    about: Bugs and feature requests for the Go core (anything under `third_party/olcrtc/` in this repo) belong upstream, not here.
+  - name: Project memory and decisions
+    url: https://github.com/artpm4250-png/olcrtc-ios/tree/main/docs/ai
+    about: Project memory (`PROJECT_MEMORY.md`), architectural decisions (`DECISIONS.md`), and the session-by-session task log (`TASK_LOG.md`). Read first if you're new.
+  - name: Release checklist and roadmap
+    url: https://github.com/artpm4250-png/olcrtc-ios/tree/main/docs
+    about: `RELEASE_CHECKLIST.md` lists every CI check and the manual QA gates; `ROADMAP.md` lists the planned milestones.

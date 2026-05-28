@@ -48,14 +48,25 @@ If you are an AI assistant or a new contributor, read these in order:
    decisions already locked in.
 4. [`docs/ai/TASK_LOG.md`](docs/ai/TASK_LOG.md) — what is done, what
    broke, what to do next.
+5. [`docs/RELEASE_CHECKLIST.md`](docs/RELEASE_CHECKLIST.md) — every
+   CI check the green workflow guarantees, the manual QA gates
+   that are deferred until signing lands, and the security /
+   privacy checklist.
+6. [`docs/ROADMAP.md`](docs/ROADMAP.md) — the five planned
+   milestones (Local Proxy MVP → real-device signed build →
+   PacketTunnelProvider feasibility → background-safe VPN runtime
+   → distribution strategy), with per-milestone tasks, blockers,
+   and acceptance criteria.
 
 ## Layout
 
 ```
 CLAUDE.md                        — AI pre-flight
+docs/                            — RELEASE_CHECKLIST.md + ROADMAP.md (this milestone)
 docs/ai/                         — durable project memory
 ios/OlcRTCClient/                — SwiftUI app + PacketTunnelProvider + tests
 .github/workflows/               — CI workflows
+.github/ISSUE_TEMPLATE/          — bug / CI failure / feature / security templates
 scripts/                         — build helpers (gomobile bind)
 third_party/olcrtc/              — git submodule: openlibrecommunity/olcrtc @ fix/all
 ```
@@ -93,3 +104,10 @@ CI produces an **unsigned** `.ipa` artifact
 re-signing. The unsigned build will **not** install and run as a VPN
 on a stock iPhone — that requires Apple signing + provisioning + the
 `NetworkExtension` entitlement (none configured here).
+
+See [`docs/RELEASE_CHECKLIST.md`](docs/RELEASE_CHECKLIST.md) for the
+full set of CI checks the latest green run of
+[`iOS App + Gomobile Build`](.github/workflows/ios-app-gomobile.yml)
+guarantees and the (deferred) manual QA checklist. See
+[`docs/ROADMAP.md`](docs/ROADMAP.md) for the path from here to a
+signed, background-safe VPN client.

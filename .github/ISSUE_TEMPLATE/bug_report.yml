@@ -1,210 +1,91 @@
-name: Bug report / Баг
-description: Сообщить о неработающем сценарии, отвале туннеля, таймауте, краше и т.п.
+name: Bug report (iOS app)
+description: A behavior in the iOS client that does not match what the app, the README, or `docs/RELEASE_CHECKLIST.md` says it does.
 title: "[bug]: "
-labels: ["bug"]
-type: Bug
+labels: ["bug", "ios"]
 body:
   - type: markdown
     attributes:
       value: |
-        Спасибо за репорт.
+        Use this for bugs in the **iOS client** — the SwiftUI app, the `PacketTunnelProvider` extension, the gomobile bridge as consumed from Swift, the unsigned IPA, or the developer-facing build pipeline as observed from a release artifact.
 
-        **Перед заполнением:**
-        - Проверь, что используешь актуальную версию (`master` или последний релиз).
-        - Если воспроизводишь на форке/старой ветке - обнови и проверь снова.
-        - Не сообщай о багах GUI-клиентов (olcbox, мобильные приложения) сюда - это баги ядра, GUI живёт в своих репозиториях.
-        - Если описание будет без логов и конфига, issue будет закрыт без разбора.
+        Bugs in the Go core itself belong upstream:
+        <https://github.com/openlibrecommunity/olcrtc/issues>.
+
+        Bugs in the CI pipeline (failing workflows) belong in a `CI failure` issue instead.
+
+        **Never** paste an `olcrtc://` URI, a `keyHex`, a password, or a subscription URL with credentials into this form. Mask before sharing — `LogSanitizer` is on by default in the app's Logs tab, so values you read from the in-app log are already safe.
 
   - type: checkboxes
     id: prerequisites
     attributes:
       label: Pre-flight checklist
       options:
-        - label: Я искал похожие issue (открытые и закрытые) и не нашёл дубликата.
+        - label: I searched open and closed issues and didn't find a duplicate.
           required: true
-        - label: Я проверил баг на актуальной версии (`master` или последний релиз).
+        - label: I read `docs/RELEASE_CHECKLIST.md` §5 (known limitations) and this bug is not one of the deliberately deferred items.
           required: true
-        - label: Это баг ядра `olcrtc`, а не GUI-клиента (olcbox/мобильное приложение).
+        - label: I will not paste `keyHex`, full `olcrtc://` URIs, passwords, or subscription URLs with credentials into this issue.
+          required: true
+        - label: This is a bug in the iOS client, not in the upstream Go core under `third_party/olcrtc/`.
           required: true
 
   - type: input
-    id: version
-    attributes:
-      label: Версия olcrtc
-      description: Тег релиза, имя ветки и git commit (`git rev-parse --short HEAD`). Если собирал из docker - пиши тег образа.
-      placeholder: "main @ a1b2c3d  /  v0.x.y  /  refactor/universal-carrier @ ef01234"
-    validations:
-      required: true
-
-  - type: dropdown
     id: build
     attributes:
-      label: Способ сборки/запуска
-      options:
-        - Native
-        - Docker / docker compose
-        - Podman / script
-        - Other
-    validations:
-      required: true
-
-  - type: dropdown
-    id: os
-    attributes:
-      label: ОС / платформа
-      multiple: true
-      options:
-        - Linux
-        - Windows
-        - MacOS
-        - Android
-        - FreeBsd
-        - OpenBSD
-        - Haiku
-        - SeL4
+      label: Build / artifact
+      description: Commit SHA you are running, or workflow run URL of the IPA artifact you sideloaded.
+      placeholder: e.g. https://github.com/artpm4250-png/olcrtc-ios/actions/runs/26597984811
     validations:
       required: true
 
   - type: input
-    id: os_version
+    id: device
     attributes:
-      label: Версия ОС / архитектура
-      placeholder: "Ubuntu 24.04 x86_64 / Windows 11 24H2 / Android 14 arm64"
+      label: Device / iOS version
+      description: Real device or simulator? Which iPhone model? Which iOS version?
+      placeholder: e.g. iPhone 14 / iOS 17.4, or iPhone 16 Simulator / iOS 18.5 on macOS-latest CI runner
     validations:
       required: true
 
   - type: dropdown
-    id: provider
+    id: mode
     attributes:
-      label: auth.provider
+      label: Mode
       options:
-        - jitsi
-        - telemost
-        - wbstream
-        - other 
-    validations:
-      required: true
-
-  - type: dropdown
-    id: transport
-    attributes:
-      label: net.transport
-      options:
-        - datachannel
-        - vp8channel
-        - seichannel
-        - videochannel
-    validations:
-      required: true
-
-  - type: dropdown
-    id: side
-    attributes:
-      label: На какой стороне проявляется
-      multiple: true
-      options:
-        - srv (сервер)
-        - cnc (клиент)
-        - gen (генератор комнат)
-    validations:
-      required: true
-
-  - type: textarea
-    id: description
-    attributes:
-      label: Описание проблемы
-      description: Что происходит, что ожидалось, как часто воспроизводится.
-      placeholder: |
-        После N минут работы туннель отваливается, перезапуск клиента не помогает, лечится только перезапуском сервера.
+        - Local Proxy Mode (wired)
+        - VPN Mode (scaffold / stub)
+        - Not mode-specific
     validations:
       required: true
 
   - type: textarea
     id: steps
     attributes:
-      label: Шаги воспроизведения
+      label: Steps to reproduce
+      description: Numbered, minimal, deterministic.
       placeholder: |
-        1. Запустить сервер с конфигом из вложения
-        2. Подключить клиент
-        3. Подождать ~15 минут / усыпить телефон
-        4. Попробовать открыть страницу через SOCKS - таймаут
+        1. Open Connect, leave all fields empty.
+        2. Tap Start.
+        3. Expected: Start is disabled. Actual: a runtime error appeared in Logs.
     validations:
       required: true
 
   - type: textarea
-    id: server_config
+    id: expected
     attributes:
-      label: Конфиг сервера (server.yaml)
+      label: Expected vs actual
+      description: What did you expect to happen, and what actually happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized log excerpt (from the Logs tab)
       description: |
-        **Обязательно вычисти `crypto.key`, `room.id`, `engine.token`, креды SOCKS, токены и любые другие секреты.**
-        Формат - code block YAML.
-      render: yaml
-      placeholder: |
-        mode: srv
-        auth:
-          provider: telemost
-        room:
-          id: "<REDACTED>"
-        crypto:
-          key: "<REDACTED>"
-        net:
-          transport: vp8channel
-          dns: "1.1.1.1:53"
-        data: data
-    validations:
-      required: true
+        Paste the relevant section of the in-app Logs tab. The Logs tab already runs every line through `LogSanitizer` before display, so what you copy from there is safe.
 
-  - type: textarea
-    id: client_config
-    attributes:
-      label: Конфиг клиента (client.yaml)
-      description: Тот же конфиг с вычищенными секретами. Если воспроизводится только на одной стороне - допустимо вписать "не используется".
-      render: yaml
-    validations:
-      required: true
-
-  - type: textarea
-    id: server_logs
-    attributes:
-      label: Логи сервера
-      description: |
-        Полные логи с момента запуска до момента ошибки.
-        Если запуск через systemd - `journalctl -u olcrtc -n 500 --no-pager`. 
-        Если docker - `docker logs <container>`.
-        Если запуск через podman - `podman logs -f <container> `.
-      render: shell
-    validations:
-      required: true
-
-  - type: textarea
-    id: client_logs
-    attributes:
-      label: Логи клиента
-      description: Полные логи клиента (включая `rtc:` строки) до момента ошибки.
-      render: shell
-    validations:
-      required: true
-
-  - type: textarea
-    id: network
-    attributes:
-      label: Сетевое окружение
-      description: |
-        Что между клиентом и сервером? 
-      placeholder: |
-        - Провайдер клиента: <название, страна/город>
-        - Провайдер/хостинг сервера: <Aeza / Play2Go / Дома>
-        - DPI/блокировки на клиенте: да/нет, что именно блокируется
-        - NAT/CGNAT: да/нет
-        - IPv6 на клиенте/сервере: да/нет
-        - Используется ли upstream SOCKS (`socks.proxy_addr`): да/нет
-    validations:
-      required: true
-
-  - type: textarea
-    id: extra
-    attributes:
-      label: Дополнительно
-      description: Что ещё может быть полезно - версия podman/docker, нестандартный конфиг (failover, traffic shaping, lifecycle), временные паттерны (бьёт раз в сутки, после сна и т.п.), известные обходы.
+        If you must paste any non-Logs-tab output, mask it manually first — anything that looks like a 64-character hex string, an `olcrtc://` URI, or a `key=value` pair where key is `keyHex` / `password` / `pass` / `secret`.
+      render: text
     validations:
       required: false

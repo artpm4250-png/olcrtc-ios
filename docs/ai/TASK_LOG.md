@@ -9,6 +9,100 @@ Date format: `YYYY-MM-DD`. Each entry should answer **what** changed and
 
 ---
 
+### 2026-05-28 — Document MVP release checklist and roadmap
+
+- Goal: capture what the current green state actually guarantees,
+  what is deliberately deferred, and what the next sequenced
+  technical chunks are, so the project is easy to continue from a
+  cold pickup. Documentation only — no app behavior change, no Go
+  core change, no signing, no new CI workflow.
+- New `docs/RELEASE_CHECKLIST.md`: the source of truth for what
+  "release-ready" means today (Local Proxy MVP, unsigned IPA, VPN
+  Mode stubbed). Sections: current artifact (workflow / artifact /
+  unsigned-IPA caveat); CI checks (one row per workflow step,
+  what it verifies); manual QA checklist (deferred until a signing
+  identity exists — every item from the task brief: launch after
+  signing, About caveats, invalid-profile Start gating, valid URI
+  import, invalid URI import, subscription import with mixed
+  valid/invalid lines, save/select/delete profile, real
+  Local Proxy Start/Stop/Check/Ping, log privacy spot check, VPN
+  Mode stub clarity); security/privacy checklist (no keyHex /
+  password / raw `olcrtc://` in logs, no secrets in CI logs,
+  unsigned IPA not distributed as production); known limitations
+  (unsigned IPA not installable, PacketTunnelProvider stubbed,
+  Local Proxy not background-reliable, no signing workflow, no
+  real-device QA, no App Store / TestFlight path); sign-off
+  protocol.
+- New `docs/ROADMAP.md`: five sequenced milestones with goal /
+  tasks / blockers / acceptance criteria for each:
+  1. **Local Proxy MVP** — mostly complete today; lists the
+     remaining intra-milestone follow-ups (App Group profile
+     storage, Keychain-for-key ADR, deferred real-device QA).
+  2. **Real-device signed build** — paid Apple Developer account,
+     App IDs for both targets, provisioning + NE entitlement,
+     separate `signed-build` workflow, re-attached
+     `.entitlements`, manual sideload + walk the QA checklist.
+  3. **PacketTunnelProvider / gomobile feasibility probe** — link
+     `OlcRTCMobile.xcframework` into the extension under
+     `APPLICATION_EXTENSION_API_ONLY = YES`, audit headers, smoke
+     test memory budget, mirror sanitized logs into App Group.
+  4. **Background-safe VPN runtime** — real
+     `NETunnelProviderManager` install + `NEPacketTunnelNetworkSettings`
+     + Go runtime bridging `NEPacketTunnelFlow`, on-demand rules
+     decision, observe `NEVPNStatusDidChange`.
+  5. **Distribution strategy** — explicit ADR (App Store /
+     TestFlight / enterprise / ad-hoc), corresponding CI pipeline,
+     App Store privacy nutrition label.
+- GitHub issue templates rewritten for the standalone-iOS context.
+  Replaced the upstream-inherited templates (which told iOS users
+  to file mobile bugs elsewhere and which were Russian-language)
+  with four iOS-specific templates: `bug_report.yml`,
+  `ci_failure.yml`, `feature_request.yml`, `security.yml`. Each
+  template enforces the project's privacy rules in pre-flight
+  checkboxes (no real keyHex, no real `olcrtc://`, no real
+  subscription URL with credentials). `config.yml` now points at
+  the upstream Go core, at `docs/ai/`, and at
+  `docs/{RELEASE_CHECKLIST,ROADMAP}.md` instead of the unrelated
+  upstream chat. Removed the inherited `question.yml` (it
+  conflicted with the iOS-only scope and routed users at the wrong
+  audience).
+- Root `README.md`: added explicit links to
+  `docs/RELEASE_CHECKLIST.md` and `docs/ROADMAP.md` from the
+  "Read me before touching anything" list (items 5 and 6); the
+  layout block mentions `.github/ISSUE_TEMPLATE/` and `docs/`;
+  the Distribution-status paragraph cross-links to both new docs;
+  the latest green workflow + artifact name are already in the
+  Status block.
+- Recommended next technical branch (record so the next session
+  can pick this up cold): **`packet-tunnel-gomobile-probe`** —
+  Milestone 3 from `docs/ROADMAP.md`. Rationale: Milestone 2
+  (signing) is blocked on resources outside our control (paid
+  Apple Developer account + real device), while Milestone 3 can
+  start as a **build-only feasibility experiment** today without a
+  signing identity. The smallest first cut: add
+  `OlcRTCMobile.xcframework` as a framework dependency on the
+  `PacketTunnelProvider` target in `project.yml` (`embed: false,
+  codeSign: false` to avoid double-embedding the Go runtime), let
+  `iOS App + Gomobile Build` discover whether the link succeeds
+  under `APPLICATION_EXTENSION_API_ONLY = YES`, and capture the
+  outcome in `docs/ai/GOMOBILE_BINDINGS.md`. If it fails, isolate
+  the offending symbol behind a shim. The runtime side (real
+  `startTunnel` wiring, packet flow bridging) stays gated on
+  Milestone 2 — but knowing whether the link is even possible is
+  a Milestone-3 prerequisite we can answer from CI alone.
+  - Alternative: **`signed-build-prep`** (Milestone 2 plumbing)
+    — write the parameterized `signed-build` workflow against
+    GitHub Actions encrypted secrets in dry-run mode, with the
+    actual identity loaded later. Less learning per token spent
+    than the probe; prefer only if the team has a paid account
+    already lined up.
+- **Not done in this step**, intentionally: any app behavior
+  change; any Swift / Go / project.yml edit; any signing; any
+  feature; any new CI workflow; any change to the IPA packaging
+  layout. Documentation and issue templates only.
+
+---
+
 ### 2026-05-28 — Harden profile import and Local Proxy MVP UX
 
 - Goal: make the Connect / Profiles / Logs / About surface actually

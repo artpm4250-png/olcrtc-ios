@@ -1,0 +1,77 @@
+name: Security or privacy issue
+description: A vulnerability, secret leak, or privacy regression in the iOS client. For sensitive vulnerabilities, prefer the private channel below.
+title: "[security]: "
+labels: ["security", "ios"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **STOP.** If this report describes an exploitable vulnerability that has not been publicly disclosed yet — a way to extract a user's `keyHex`, a way to bypass `LogSanitizer`, a way for another app on the device to read profile data, a code-injection vector in URI / subscription parsing, etc. — **do not file a public issue**. Use GitHub's private vulnerability reporting flow:
+
+        <https://github.com/artpm4250-png/olcrtc-ios/security/advisories/new>
+
+        Public issues are appropriate for:
+        - already-disclosed weaknesses you want to track;
+        - privacy regressions (a log line that ought to have been masked but wasn't, surfaced in a sanitized excerpt below);
+        - hardening proposals that don't reveal an exploit;
+        - questions about the threat model.
+
+  - type: checkboxes
+    id: prerequisites
+    attributes:
+      label: Pre-flight checklist
+      options:
+        - label: This report does **not** describe an undisclosed, exploitable vulnerability. (If it does, I closed this and used the private advisory link above instead.)
+          required: true
+        - label: I will not paste a real `keyHex`, a real `olcrtc://` URI, a real subscription URL, or any other user secret into this issue.
+          required: true
+        - label: Any log excerpt I paste below was copied from the in-app Logs tab (already sanitized) or was masked manually.
+          required: true
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      options:
+        - Log sanitization gap (something leaked that shouldn't)
+        - Profile storage (data at rest)
+        - URI / subscription parsing
+        - Network transport surface
+        - PacketTunnelProvider extension boundary
+        - CI / build pipeline secret handling
+        - Other (please describe in detail below)
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: |
+        Describe the issue without including any real secret values. If you need to show a leaked pattern, replace the actual bytes with `<masked>` or use a deliberately invalid stand-in.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction (sanitized)
+      description: |
+        Steps to observe the issue, with all real secrets replaced by stand-ins. Example:
+
+        ```
+        1. Import olcrtc://wbstream?datachannel@room-01#<64 hex chars> via the Profiles tab.
+        2. Open the Logs tab and search for the literal substring `room-01`.
+        3. Expected: not present (room IDs are not sensitive but should not be repeated more than once per import line).
+        4. Actual: appears in 3 log lines.
+        ```
+    validations:
+      required: true
+
+  - type: textarea
+    id: suggested_fix
+    attributes:
+      label: Suggested fix (optional)
+      description: If you have an idea for the smallest change that fixes this without regressing other behavior, mention it here.
+    validations:
+      required: false

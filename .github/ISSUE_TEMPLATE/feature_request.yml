@@ -1,76 +1,81 @@
-name: Feature request / Фича
-description: Предложить новую функциональность, провайдер, транспорт, интеграцию.
+name: Feature request (iOS app)
+description: A proposed addition or change to the iOS client's behavior, UI, or build pipeline.
 title: "[feat]: "
-labels: ["enhancement"]
-type: Feature
+labels: ["enhancement", "ios"]
 body:
   - type: markdown
     attributes:
       value: |
-        Перед заполнением:
-        - Проверь, что фичи ещё нет в ветке `master` или в [закрепленных задачах](https://github.com/openlibrecommunity/olcrtc/issues).
-        - Не предлагай бред вида "сделайте клиент под iOS / встройте в openwrt люси-плагин".
-        - Кастомные/нишевые интеграции можно и нужно предлагать .
+        Use this for proposed changes to the **iOS client** — the SwiftUI surface, the gomobile bridge as consumed from Swift, the build pipeline, the unsigned IPA layout, or the CI workflows in this repo.
+
+        Feature requests for the Go core itself belong upstream:
+        <https://github.com/openlibrecommunity/olcrtc/issues>.
+
+        Before filing, check whether the request is already covered by a future milestone in [`docs/ROADMAP.md`](https://github.com/artpm4250-png/olcrtc-ios/blob/main/docs/ROADMAP.md). If it is, comment on that milestone's tracking issue instead.
 
   - type: checkboxes
     id: prerequisites
     attributes:
-      label: Pre-flight
+      label: Pre-flight checklist
       options:
-        - label: Я искал похожие issue (открытые и закрытые) и не нашёл дубликата.
+        - label: I read `docs/ROADMAP.md` and this is not a duplicate of a planned milestone.
           required: true
-        - label: Это относится к ядру `olcrtc`, а не к GUI-клиенту.
+        - label: This is a request for the iOS client, not for the Go core under `third_party/olcrtc/`.
           required: true
 
   - type: textarea
     id: problem
     attributes:
-      label: Проблема / use-case
-      description: Что не работает или работает неудобно сейчас.
+      label: Problem
+      description: What can't a user do today, or what is harder than it should be?
       placeholder: |
-        Сейчас приходится запускать отдельный процесс на каждую room - это неудобно когда...
+        e.g. "Cannot export a saved profile as an `olcrtc://` URI to share it with another device."
     validations:
       required: true
 
   - type: textarea
     id: proposal
     attributes:
-      label: Предлагаемое решение
-      description: Конкретно, что добавить/изменить. Желательно с уровнем деталей "какой пакет/конфиг/API".
-      placeholder: |
-        Перенести `internal/app/session` в `pkg/session` и сделать стабильным API для встраивания.
+      label: Proposed solution
+      description: One paragraph on what you'd add or change. UI sketches in ASCII or screenshots welcome. State explicitly which target (app vs extension) the change affects.
     validations:
       required: true
 
   - type: textarea
     id: alternatives
     attributes:
-      label: Альтернативы
-      description: Что ты пробовал/рассматривал и почему оно не подходит.
+      label: Alternatives considered
+      description: One or two paragraphs on other approaches and why this one is better.
     validations:
       required: false
 
   - type: dropdown
     id: scope
     attributes:
-      label: Область
+      label: Scope
       multiple: true
       options:
-        - auth provider (jitsi/telemost/wbstream/новый)
-        - net transport (datachannel/vp8/sei/video/новый)
-        - mux / control / liveness
-        - конфиг / CLI / URI / sub
-        - сборка / CI / пакетирование
-        - документация
-        - библиотечный API (`pkg/`)
-        - другое
+        - UI / UX
+        - Profile import / parsing
+        - Subscription import
+        - Local Proxy Mode
+        - VPN Mode / PacketTunnelProvider
+        - Logging / privacy
+        - Build / CI
+        - Documentation
+        - Other
     validations:
       required: true
 
-  - type: textarea
-    id: contribution
+  - type: checkboxes
+    id: hard_rules
     attributes:
-      label: Готов ли сделать PR
-      placeholder: "Да / Нет / Могу помочь с тестами"
-    validations:
-      required: true
+      label: Hard rules check (`CLAUDE.md`)
+      description: Confirm the proposal does not violate the rules in `CLAUDE.md`.
+      options:
+        - label: This change does **not** require editing the Go core under `third_party/olcrtc/` from this repo.
+          required: true
+        - label: This change does **not** require shipping UI that pretends VPN Mode works before it is wired.
+          required: true
+        - label: This change does **not** require logging or persisting raw `keyHex`, `password`, or full `olcrtc://` URIs.
+          required: true

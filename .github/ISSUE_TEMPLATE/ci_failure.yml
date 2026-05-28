@@ -1,0 +1,66 @@
+name: CI failure
+description: A workflow under `.github/workflows/` failed in a way that was not caused by the change in the triggering commit.
+title: "[ci]: "
+labels: ["ci", "ios"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this when a green workflow (commonly `iOS App + Gomobile Build`) goes red and you suspect a runner / infrastructure / submodule / toolchain problem rather than a regression in the commit that triggered the run.
+
+        If the failure is reproducible locally and is caused by the code change, prefer the `Bug report (iOS app)` template instead.
+
+  - type: checkboxes
+    id: prerequisites
+    attributes:
+      label: Pre-flight checklist
+      options:
+        - label: I checked that this was not caused by the commit that triggered the run (re-running the workflow on a known-good commit also fails).
+          required: false
+        - label: I will not paste secrets or tokens into this issue.
+          required: true
+
+  - type: input
+    id: workflow
+    attributes:
+      label: Workflow
+      placeholder: e.g. iOS App + Gomobile Build
+    validations:
+      required: true
+
+  - type: input
+    id: run_url
+    attributes:
+      label: Failing run URL
+      placeholder: https://github.com/artpm4250-png/olcrtc-ios/actions/runs/<id>
+    validations:
+      required: true
+
+  - type: input
+    id: step
+    attributes:
+      label: Failing step
+      description: Name of the step that surfaced the failure (e.g. `Build OlcRTCMobile.xcframework`, `Run tests (iphonesimulator)`, `Inspect and validate unsigned IPA structure`).
+    validations:
+      required: true
+
+  - type: textarea
+    id: error
+    attributes:
+      label: First relevant error block
+      description: |
+        Copy the smallest excerpt of the failing step's log that shows the actual error. Prefer copying from the step's collapsed error annotation rather than the full log.
+
+        Mask anything that looks like a secret, a key, or a personal path. The runner home directory is `/Users/runner/` — paths under there are safe to share.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: suspected_cause
+    attributes:
+      label: Suspected cause (optional)
+      description: |
+        E.g. "macos-latest image bump dropped iPhone 16 simulator", "upstream Go bumped to a version setup-go can't fetch", "`brew install xcodegen` slow / 503", "`gomobile init` hung", etc. Cross-check against the `Broken / known issues` section of `docs/ai/TASK_LOG.md` first.
+    validations:
+      required: false
