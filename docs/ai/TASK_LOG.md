@@ -9,7 +9,89 @@ Date format: `YYYY-MM-DD`. Each entry should answer **what** changed and
 
 ---
 
-### 2026-05-28 — Isolated gomobile iOS bind script + workflow added
+### 2026-05-28 — First gomobile bind attempt failed; bind moved inside upstream module
+
+- First run of `Gomobile iOS Bind` failed at the
+  `Build OlcRTCMobile.xcframework` step. Root cause from the workflow
+  log: `gomobile bind` was invoked from the standalone iOS repo root,
+  which has **no `go.mod`**, so it could not find
+  `golang.org/x/mobile` in any module dependency graph and bailed
+  with:
+
+  ```
+  gomobile bind requires golang.org/x/mobile in the current module,
+  but it is not in the module dependency graph.
+  Add it with:
+      go get -tool golang.org/x/mobile/cmd/gobind
+  gomobile: missing golang.org/x/mobile dependency
+  ```
+
+  The remediation the error suggests (`go get -tool ...`) would
+  mutate `third_party/olcrtc/go.mod`, which is **upstream Go core** —
+  forbidden by the current task brief and by `CLAUDE.md`.
+
+- Attempted fix (this commit): run `gomobile bind` from **inside**
+  the upstream Go module instead of from the iOS repo root.
+  `third_party/olcrtc/go.mod` already exists and already owns the
+  `./mobile` package, so it is the natural home for the bind
+  dependency graph. `scripts/build-gomobile-ios.sh` now:
+  - resolves the repo root (unchanged),
+  - verifies both `third_party/olcrtc/go.mod` and
+    `third_party/olcrtc/mobile` exist,
+  - prepends `$(go env GOPATH)/bin` to `PATH`,
+  - installs `golang.org/x/mobile/cmd/gomobile@latest` and
+    `golang.org/x/mobile/cmd/gobind@latest` if missing
+    (`go install` resolves via the build cache and does NOT touch the
+    upstream module),
+  - runs `gomobile init`,
+  - `cd third_party/olcrtc`,
+  - prints diagnostics from inside the upstream module: `pwd`,
+    `go env GOMOD`, `go list -m golang.org/x/mobile` (best-effort —
+    will fail if not in graph, but we want to see that), and
+    `go test -count=1 ./mobile`,
+  - runs:
+    ```
+    gomobile bind -v \
+      -target=ios \
+      -o ../../ios/OlcRTCClient/Frameworks/OlcRTCMobile.xcframework \
+      ./mobile
+    ```
+  - returns to repo root for the output inspection.
+  Explicit non-actions in the script (commented at the top):
+  no `go get`, no edits to `third_party/olcrtc/go.mod`, no edits to
+  `third_party/olcrtc/go.sum`, no wrapper module, no `go.work`.
+- The workflow file `.github/workflows/gomobile-ios-bind.yml` is
+  unchanged in this commit. It already checks out submodules
+  recursively, sets up Go via `third_party/olcrtc/go.mod`, runs
+  `go test -count=1 ./mobile` inside `third_party/olcrtc`, then
+  delegates to the script — that wiring is still correct now that
+  the script itself moves into the upstream module before bind.
+
+#### Fallbacks if this attempt also fails
+
+If `gomobile bind` from inside `third_party/olcrtc` still rejects
+the build (most likely cause: `golang.org/x/mobile` not in the
+upstream module's dependency graph and we are not allowed to add it
+there), the next escalation is — in order of increasing invasiveness,
+each requiring its own ADR / brief:
+
+1. **Local wrapper module** in this repo (e.g. a tiny `go.mod` under
+   `scripts/gomobile-shim/` that imports
+   `github.com/openlibrecommunity/olcrtc/mobile` via a `replace`
+   directive pointing at `../../third_party/olcrtc` and declares
+   `golang.org/x/mobile` as a tool dependency). `gomobile bind` runs
+   inside the shim, but `./mobile` source still comes from upstream.
+2. **`go.work` at this repo's root** listing
+   `third_party/olcrtc` and a tiny local module that holds the
+   gomobile tool dependency. Same idea as (1), expressed via
+   workspaces.
+3. **Last resort**: open an upstream PR adding `golang.org/x/mobile`
+   to `third_party/olcrtc/go.mod` (this is a Go-core change — not
+   allowed from this repo per ADR-0011).
+
+Do not pre-implement these in this step.
+
+---
 
 - Goal of this step: verify that the standalone iOS repo can produce
   `OlcRTCMobile.xcframework` from the upstream Go core
