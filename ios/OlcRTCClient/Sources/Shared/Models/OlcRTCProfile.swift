@@ -35,6 +35,14 @@ public struct OlcRTCProfile: Identifiable, Codable, Hashable, Sendable {
     public var vp8FPS: Int?
     public var vp8BatchSize: Int?
 
+    // Liveness probe configuration forwarded to
+    // `MobileSetLivenessOptions(intervalMillis, timeoutMillis, failures)`.
+    // Defaults match the Go core's defaults so that existing UI flows
+    // (which don't yet expose these) keep behaving as before.
+    public var livenessIntervalMillis: Int
+    public var livenessTimeoutMillis: Int
+    public var livenessFailures: Int
+
     public init(
         id: UUID = UUID(),
         name: String,
@@ -49,7 +57,10 @@ public struct OlcRTCProfile: Identifiable, Codable, Hashable, Sendable {
         dnsServer: String = "8.8.8.8:53",
         debug: Bool = false,
         vp8FPS: Int? = nil,
-        vp8BatchSize: Int? = nil
+        vp8BatchSize: Int? = nil,
+        livenessIntervalMillis: Int = 30000,
+        livenessTimeoutMillis: Int = 10000,
+        livenessFailures: Int = 3
     ) {
         self.id = id
         self.name = name
@@ -65,5 +76,31 @@ public struct OlcRTCProfile: Identifiable, Codable, Hashable, Sendable {
         self.debug = debug
         self.vp8FPS = vp8FPS
         self.vp8BatchSize = vp8BatchSize
+        self.livenessIntervalMillis = livenessIntervalMillis
+        self.livenessTimeoutMillis = livenessTimeoutMillis
+        self.livenessFailures = livenessFailures
+    }
+
+    // Custom decoder so previously-persisted profiles (without the
+    // liveness fields) still decode cleanly with default values.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        self.name = try c.decode(String.self, forKey: .name)
+        self.provider = try c.decode(OlcRTCProvider.self, forKey: .provider)
+        self.transport = try c.decode(OlcRTCTransport.self, forKey: .transport)
+        self.roomID = try c.decode(String.self, forKey: .roomID)
+        self.clientID = try c.decode(String.self, forKey: .clientID)
+        self.keyHex = try c.decode(String.self, forKey: .keyHex)
+        self.mimo = try c.decodeIfPresent(String.self, forKey: .mimo)
+        self.socksHost = try c.decodeIfPresent(String.self, forKey: .socksHost) ?? "127.0.0.1"
+        self.socksPort = try c.decodeIfPresent(Int.self, forKey: .socksPort) ?? 8808
+        self.dnsServer = try c.decodeIfPresent(String.self, forKey: .dnsServer) ?? "8.8.8.8:53"
+        self.debug = try c.decodeIfPresent(Bool.self, forKey: .debug) ?? false
+        self.vp8FPS = try c.decodeIfPresent(Int.self, forKey: .vp8FPS)
+        self.vp8BatchSize = try c.decodeIfPresent(Int.self, forKey: .vp8BatchSize)
+        self.livenessIntervalMillis = try c.decodeIfPresent(Int.self, forKey: .livenessIntervalMillis) ?? 30000
+        self.livenessTimeoutMillis = try c.decodeIfPresent(Int.self, forKey: .livenessTimeoutMillis) ?? 10000
+        self.livenessFailures = try c.decodeIfPresent(Int.self, forKey: .livenessFailures) ?? 3
     }
 }

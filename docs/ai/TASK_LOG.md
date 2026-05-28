@@ -9,6 +9,94 @@ Date format: `YYYY-MM-DD`. Each entry should answer **what** changed and
 
 ---
 
+### 2026-05-28 — Fix Swift gomobile service integration compile errors
+
+- Goal: get `iOS App + Gomobile Build` past the `Build app (Debug,
+  iphonesimulator)` step. The previous `Wire Local Proxy Mode to real
+  gomobile API` commit compiled against assumed gomobile signatures
+  that turned out to be wrong once the framework actually built.
+- Robust CI destination (commit `a9d18a9`) unblocked the simulator
+  build runner-side; the next run exposed a wall of Swift compile
+  errors against the real generated headers
+  ([run 26591390505](https://github.com/artpm4250-png/olcrtc-ios/actions/runs/26591390505)).
+- Concrete fixes in this step:
+  - **`OlcRTCProfile`** now carries three liveness fields with safe
+    defaults that match the Go core (`livenessIntervalMillis = 30000`,
+    `livenessTimeoutMillis = 10000`, `livenessFailures = 3`), plus a
+    custom `init(from:)` so previously-persisted profile JSON (which
+    has none of these keys) still decodes.
+  - **`LocalProxyManager`** unwraps optional `vp8FPS` / `vp8BatchSize`
+    with safe defaults (`30` and `1`) at the call sites that forward
+    them to `RealOlcRTCService`. The Go core expects plain `int`, not
+    `Int?`.
+  - **`RealOlcRTCService`** stops assuming that gomobile `BOOL fn(...,
+    NSError**)` shapes auto-import as Swift `throws`. They do not —
+    the Swift importer leaves them as raw Obj-C signatures. Every call
+    site now allocates `var err: NSError?` (and, for `Check`/`Ping`,
+    `var ret: Int64 = 0`), passes them by pointer, inspects the `Bool`
+    return, and throws `err ?? RealOlcRTCServiceError.<reason>` on
+    `false`. Added a local `RealOlcRTCServiceError` enum so a `false`
+    return without an `NSError` (defensive) still produces a useful
+    `LocalizedError`.
+  - `SwiftLogWriter` now uses an instance `LogSanitizer()` (the type
+    is a `struct` with an instance `sanitize(_:)` method; the previous
+    static-method call site would not compile).
+  - `AppState.ping()` no longer references `mock` unconditionally —
+    the `mock` property is gated behind `#if !canImport(OlcRTCMobile)`,
+    so the function body is too.
+- Updated `docs/ai/GOMOBILE_BINDINGS.md`:
+  - Section 2 (symbol mapping) replaced "Swift throws" entries with
+    the real `BOOL` + `NSError**` calling convention discovered at
+    compile time.
+  - Section 3 (log writer) documents the `MobileLogWriter` /
+    `MobileLogWriterProtocol` rename caused by the same-named Obj-C
+    class + protocol.
+  - Section 4 (compile-validated unknowns) records the exact Swift
+    call shapes that finally compiled for `Start`, `WaitReady`,
+    `Check`, `Ping`.
+- **Not done in this step**, intentionally: any new UI for liveness
+  configuration, any change to `MockOlcRTCService` (still used by
+  scaffold-only builds), wiring gomobile into `PacketTunnelProvider`,
+  IPA packaging, Go-core changes.
+
+---
+
+### 2026-05-28 — Make iOS simulator destination robust in CI
+
+- Goal: stop both iOS CI workflows from depending on a specific
+  simulator device name (`iPhone 16`) that may or may not be
+  installed on the GitHub Actions macOS runner image.
+- Background: the run after the `MobileLogWriter` /
+  `MobileLogWriterProtocol` fix failed at `Build app (Debug,
+  iphonesimulator)` **before** any Swift was compiled, with
+  `xcodebuild: error: Unable to find a device matching the provided
+  destination specifier: { platform:iOS Simulator, OS:latest, name:iPhone 16 }`.
+  An earlier run on a different runner instance found `iPhone 16`
+  fine, so this is a runner-image flake, not a project bug.
+- Changes in `.github/workflows/ios-app-gomobile.yml` and
+  `.github/workflows/ios-scaffold.yml` (same edits applied to both):
+  - Added a `Diagnose simulator availability` step that prints
+    `xcrun simctl list devices available` and `xcodebuild -showsdks`
+    so future runner flakes are obvious from the log.
+  - Added a `Pick iOS Simulator destination` step that parses
+    `simctl list devices available -j`, picks the first available
+    `iPhone*` simulator across all installed iOS runtimes, and writes
+    `IOS_SIMULATOR_DESTINATION=platform=iOS Simulator,id=<UDID>` to
+    `$GITHUB_ENV`. If no concrete iPhone simulator is available it
+    falls back to `IOS_SIMULATOR_DESTINATION=generic/platform=iOS
+    Simulator`.
+  - `xcodebuild build` for the simulator uses the static
+    `generic/platform=iOS Simulator` destination (build doesn't need a
+    bootable device).
+  - `xcodebuild test` uses `${IOS_SIMULATOR_DESTINATION}` (tests
+    require a concrete bootable simulator).
+- The `Release iphoneos generic` build step is unchanged — it already
+  uses `generic/platform=iOS` and never had this issue.
+- **Not done in this step**, intentionally: IPA packaging, signing,
+  wiring gomobile into `PacketTunnelProvider`, any Swift-code change.
+
+---
+
 ### 2026-05-28 — Local Proxy Mode wired to real gomobile API
 
 - Goal: replace `MockOlcRTCService` with calls to the real

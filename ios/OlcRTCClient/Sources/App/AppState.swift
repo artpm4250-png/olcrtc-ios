@@ -98,9 +98,17 @@ final class AppState: ObservableObject {
     }
 
     func ping() async {
+        #if canImport(OlcRTCMobile)
+        // Real Ping is wired in `RealOlcRTCService.ping(...)` via
+        // `LocalProxyManager.ping(...)`. The UI does not yet drive that
+        // call directly; surface a deliberate stub message instead of a
+        // fake mock latency when the real framework is linked.
+        appendLog("Ping: real gomobile Ping is wired in RealOlcRTCService; UI hookup is intentionally pending.")
+        #else
         appendLog("Ping: not yet wired to gomobile. Stub returns mock latency.")
         let ms = await mock.mockPingMillis()
         appendLog("Ping (mock): \(ms) ms")
+        #endif
     }
 
     func handleIncomingURL(_ url: URL) {

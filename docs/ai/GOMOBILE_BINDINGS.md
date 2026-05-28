@@ -61,11 +61,11 @@ prefix in Obj-C. Swift imports them with the same `Mobile` prefix
 | `mobile.SetVP8Options(fps, batchSize int)` | `FOUNDATION_EXPORT void MobileSetVP8Options(long fps, long batchSize);` | `MobileSetVP8Options(_:_:)` | Go `int` → Obj-C `long` → Swift `Int` |
 | `mobile.SetLivenessOptions(intervalMillis, timeoutMillis, failures int)` | `FOUNDATION_EXPORT void MobileSetLivenessOptions(long intervalMillis, long timeoutMillis, long failures);` | `MobileSetLivenessOptions(_:_:_:)` | same |
 | `mobile.SetDebug(enabled bool)` | `FOUNDATION_EXPORT void MobileSetDebug(BOOL enabled);` | `MobileSetDebug(_:)` | Go `bool` → Obj-C `BOOL` → Swift `Bool` |
-| `mobile.Start(carrierName, roomID, clientID, keyHex string, socksPort int, socksUser, socksPass string) error` | `FOUNDATION_EXPORT BOOL MobileStart(NSString* carrierName, NSString* roomID, NSString* clientID, NSString* keyHex, long socksPort, NSString* socksUser, NSString* socksPass, NSError** error);` | `try MobileStart(_:_:_:_:_:_:_:)` | Go `error` → Obj-C `BOOL` return + `NSError**` out-param → Swift throwing function |
-| `mobile.StartWithTransport(carrierName, transportName, roomID, clientID, keyHex string, socksPort int, socksUser, socksPass string) error` | `FOUNDATION_EXPORT BOOL MobileStartWithTransport(NSString* carrierName, NSString* transportName, NSString* roomID, NSString* clientID, NSString* keyHex, long socksPort, NSString* socksUser, NSString* socksPass, NSError** error);` | `try MobileStartWithTransport(_:_:_:_:_:_:_:_:)` | same |
-| `mobile.Check(carrierName, transportName, roomID, clientID, keyHex string, socksPort, timeoutMillis, vp8FPS, vp8BatchSize int) (int64, error)` | `FOUNDATION_EXPORT BOOL MobileCheck(NSString* carrierName, NSString* transportName, NSString* roomID, NSString* clientID, NSString* keyHex, long socksPort, long timeoutMillis, long vp8FPS, long vp8BatchSize, int64_t* ret0_, NSError** error);` | `try MobileCheck(_:_:_:_:_:_:_:_:_:_:)` → `Int64` | Go `(int64, error)` → Obj-C `BOOL` + `int64_t* ret0_` + `NSError**` → Swift throwing function returning `Int64` (the out-param becomes the return value) |
-| `mobile.Ping(carrierName, transportName, roomID, clientID, keyHex string, socksPort, timeoutMillis int, pingURL string, vp8FPS, vp8BatchSize int) (int64, error)` | `FOUNDATION_EXPORT BOOL MobilePing(NSString* carrierName, NSString* transportName, NSString* roomID, NSString* clientID, NSString* keyHex, long socksPort, long timeoutMillis, NSString* pingURL, long vp8FPS, long vp8BatchSize, int64_t* ret0_, NSError** error);` | `try MobilePing(_:_:_:_:_:_:_:_:_:_:_:)` → `Int64` | same |
-| `mobile.WaitReady(timeoutMillis int) error` | `FOUNDATION_EXPORT BOOL MobileWaitReady(long timeoutMillis, NSError** error);` | `try MobileWaitReady(_:)` | throwing |
+| `mobile.Start(carrierName, roomID, clientID, keyHex string, socksPort int, socksUser, socksPass string) error` | `FOUNDATION_EXPORT BOOL MobileStart(NSString* carrierName, NSString* roomID, NSString* clientID, NSString* keyHex, long socksPort, NSString* socksUser, NSString* socksPass, NSError** error);` | `MobileStart(_, _, _, _, _, _, _, &err) -> Bool` | **Not auto-throws.** Swift sees the raw Obj-C signature; pass `NSErrorPointer` and inspect the `Bool` return. |
+| `mobile.StartWithTransport(carrierName, transportName, roomID, clientID, keyHex string, socksPort int, socksUser, socksPass string) error` | `FOUNDATION_EXPORT BOOL MobileStartWithTransport(NSString* carrierName, NSString* transportName, NSString* roomID, NSString* clientID, NSString* keyHex, long socksPort, NSString* socksUser, NSString* socksPass, NSError** error);` | `MobileStartWithTransport(_, _, _, _, _, _, _, _, &err) -> Bool` | same |
+| `mobile.Check(carrierName, transportName, roomID, clientID, keyHex string, socksPort, timeoutMillis, vp8FPS, vp8BatchSize int) (int64, error)` | `FOUNDATION_EXPORT BOOL MobileCheck(NSString* carrierName, NSString* transportName, NSString* roomID, NSString* clientID, NSString* keyHex, long socksPort, long timeoutMillis, long vp8FPS, long vp8BatchSize, int64_t* ret0_, NSError** error);` | `MobileCheck(_, _, _, _, _, _, _, _, _, &ret, &err) -> Bool` | The `int64_t* ret0_` stays a real out-parameter; pass `inout Int64`. |
+| `mobile.Ping(carrierName, transportName, roomID, clientID, keyHex string, socksPort, timeoutMillis int, pingURL string, vp8FPS, vp8BatchSize int) (int64, error)` | `FOUNDATION_EXPORT BOOL MobilePing(NSString* carrierName, NSString* transportName, NSString* roomID, NSString* clientID, NSString* keyHex, long socksPort, long timeoutMillis, NSString* pingURL, long vp8FPS, long vp8BatchSize, int64_t* ret0_, NSError** error);` | `MobilePing(_, _, _, _, _, _, _, _, _, _, &ret, &err) -> Bool` | same |
+| `mobile.WaitReady(timeoutMillis int) error` | `FOUNDATION_EXPORT BOOL MobileWaitReady(long timeoutMillis, NSError** error);` | `MobileWaitReady(_, &err) -> Bool` | not throwing — see note below |
 | `mobile.Stop()` | `FOUNDATION_EXPORT void MobileStop(void);` | `MobileStop()` | void |
 | `mobile.IsRunning() bool` | `FOUNDATION_EXPORT BOOL MobileIsRunning(void);` | `MobileIsRunning()` → `Bool` | non-throwing |
 | `mobile.SetLogWriter(w LogWriter)` | `FOUNDATION_EXPORT void MobileSetLogWriter(id<MobileLogWriter> _Nullable w);` | `MobileSetLogWriter(_:)` | see section 3 |
@@ -75,24 +75,36 @@ prefix in Obj-C. Swift imports them with the same `Mobile` prefix
 
 ## 3. Log writer support
 
-The Go `LogWriter` interface surfaces as an Obj-C protocol:
+The Go `LogWriter` interface surfaces as an Obj-C protocol **and** a
+same-named class (gomobile emits both — a Go-backed concrete class for
+returning instances *from* Go, and a protocol for Swift-implemented
+writers passed *into* Go):
 
 ```objc
 @protocol MobileLogWriter <NSObject>
 - (void)writeLog:(NSString* _Nullable)msg;
 @end
+
+@interface MobileLogWriter : NSObject <goSeqRefInterface, MobileLogWriter> { … }
 ```
 
-Swift implements it via a class conforming to `MobileLogWriter`:
+Because both share the name `MobileLogWriter`, Swift's Obj-C importer
+renames the **protocol** to `MobileLogWriterProtocol` (and keeps the
+class as `MobileLogWriter`). A Swift type that wants to receive log
+lines from Go must conform to the renamed protocol, **not** the class:
 
 ```swift
 import OlcRTCMobile
 
-class SwiftLogWriter: NSObject, MobileLogWriter {
+// CORRECT — conforms to the renamed protocol:
+class SwiftLogWriter: NSObject, MobileLogWriterProtocol {
     func writeLog(_ msg: String?) {
         // sanitize + forward to app log sink
     }
 }
+
+// WRONG — Swift reads this as multiple inheritance from two classes:
+// class SwiftLogWriter: NSObject, MobileLogWriter { ... }
 ```
 
 Pass an instance to `MobileSetLogWriter(_:)`. Sanitization (per
@@ -106,10 +118,64 @@ ADR-0010) is still Swift's job; the bridge is just the raw log line.
   `Mobile` prefix in Swift (not lowercased). Argument labels are
   positional `_:` for all parameters (gomobile does not emit named
   Obj-C parameters for Go functions with multiple string args).
-- **Throwing vs. non-throwing:** Confirmed that Go `error` return
-  imports as Swift `throws`, and Go `(int64, error)` imports as
-  `throws -> Int64` (the `int64_t* ret0_` out-param becomes the Swift
-  return value).
+- **Throwing vs. non-throwing:** Initial assumption (verified
+  **WRONG** during the
+  [Wire Local Proxy Mode](https://github.com/artpm4250-png/olcrtc-ios/actions/runs/26591390505)
+  compile attempt) was that Go `error` returns would import as Swift
+  `throws`. They do **not**. The generated gomobile signatures use the
+  generic `BOOL fn(..., NSError** error)` shape, and the Swift
+  importer does **not** convert them to throwing functions (the symbol
+  names don't fit the importer's Foundation-method-family
+  heuristics). Each call site must:
+  1. allocate `var err: NSError?` (and, for `Check`/`Ping`, also
+     `var ret: Int64 = 0`),
+  2. pass them by pointer (`&err`, `&ret`),
+  3. branch on the `Bool` return: throw `err ?? <fallbackError>` when
+     the call returned `false`, otherwise use the out value.
+
+  Confirmed working Swift call shapes (from `RealOlcRTCService.swift`):
+
+  ```swift
+  // Start with explicit transport:
+  var err: NSError?
+  let ok = MobileStartWithTransport(
+      carrier, transport, roomID, clientID, keyHex,
+      socksPort, "", "", &err
+  )
+  if !ok { throw err ?? RealOlcRTCServiceError.startFailed }
+
+  // WaitReady:
+  var err: NSError?
+  let ok = MobileWaitReady(timeoutMillis, &err)
+  if !ok { throw err ?? RealOlcRTCServiceError.waitReadyFailed }
+
+  // Check (returns Int64 via out-param):
+  var ret: Int64 = 0
+  var err: NSError?
+  let ok = MobileCheck(
+      carrier, transport, roomID, clientID, keyHex,
+      socksPort, timeoutMillis, vp8FPS, vp8BatchSize,
+      &ret, &err
+  )
+  if !ok { throw err ?? RealOlcRTCServiceError.checkFailed }
+  // use `ret`
+
+  // Ping (returns Int64 via out-param):
+  var ret: Int64 = 0
+  var err: NSError?
+  let ok = MobilePing(
+      carrier, transport, roomID, clientID, keyHex,
+      socksPort, timeoutMillis, pingURL, vp8FPS, vp8BatchSize,
+      &ret, &err
+  )
+  if !ok { throw err ?? RealOlcRTCServiceError.pingFailed }
+  // use `ret`
+  ```
+
+- **`MobileLogWriter` naming clash:** Confirmed (above) that Swift
+  renames the protocol to `MobileLogWriterProtocol` when there is a
+  same-named class. Conform Swift types to
+  `MobileLogWriterProtocol`, not `MobileLogWriter`.
 - **`APPLICATION_EXTENSION_API_ONLY` safety:** Not yet validated. The
   `PacketTunnelProvider` extension is built with
   `APPLICATION_EXTENSION_API_ONLY: YES`; if gomobile pulls in any

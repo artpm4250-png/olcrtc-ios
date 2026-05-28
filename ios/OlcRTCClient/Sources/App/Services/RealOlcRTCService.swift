@@ -3,9 +3,38 @@ import Foundation
 #if canImport(OlcRTCMobile)
 import OlcRTCMobile
 
+/// Errors raised when a gomobile call returns `false` but does not
+/// supply an `NSError` instance (defensive — should not happen in
+/// practice, but Obj-C `BOOL`/`NSError**` patterns allow it).
+enum RealOlcRTCServiceError: Error, LocalizedError {
+    case startFailed
+    case waitReadyFailed
+    case checkFailed
+    case pingFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .startFailed:     return "MobileStartWithTransport returned false without an error."
+        case .waitReadyFailed: return "MobileWaitReady returned false without an error."
+        case .checkFailed:     return "MobileCheck returned false without an error."
+        case .pingFailed:      return "MobilePing returned false without an error."
+        }
+    }
+}
+
 /// Real olcRTC service backed by the gomobile-generated `OlcRTCMobile.xcframework`.
 /// Only compiled when the framework is available (i.e., after `scripts/build-gomobile-ios.sh`
 /// has run and the framework is present at `ios/OlcRTCClient/Frameworks/OlcRTCMobile.xcframework`).
+///
+/// The gomobile-generated Obj-C signatures use the classic
+/// `BOOL fn(..., NSError** error)` shape. Swift's auto-throws inference
+/// does NOT pick these up (the symbol names don't match the heuristics
+/// for the Foundation method family), so each call site explicitly:
+///
+///   1. allocates an `NSError?` and, where applicable, an `Int64` out var,
+///   2. passes them by pointer,
+///   3. throws the `NSError` (or a fallback) if the call returns `false`,
+///   4. otherwise returns the out value.
 ///
 /// See `docs/ai/GOMOBILE_BINDINGS.md` for the authoritative symbol mapping.
 class RealOlcRTCService {
@@ -48,11 +77,13 @@ class RealOlcRTCService {
             MobileSetLogWriter(writer)
         }
 
-        // Start with explicit transport.
-        // Go signature: StartWithTransport(carrierName, transportName, roomID, clientID, keyHex string, socksPort int, socksUser, socksPass string) error
-        // Obj-C: BOOL MobileStartWithTransport(NSString* carrierName, NSString* transportName, NSString* roomID, NSString* clientID, NSString* keyHex, long socksPort, NSString* socksUser, NSString* socksPass, NSError** error)
-        // Swift: try MobileStartWithTransport(_:_:_:_:_:_:_:_:)
-        try MobileStartWithTransport(
+        // Obj-C:
+        //   BOOL MobileStartWithTransport(NSString* carrierName, NSString* transportName,
+        //                                 NSString* roomID, NSString* clientID, NSString* keyHex,
+        //                                 long socksPort, NSString* socksUser, NSString* socksPass,
+        //                                 NSError** error);
+        var err: NSError?
+        let ok = MobileStartWithTransport(
             carrier,
             transport,
             roomID,
@@ -60,8 +91,12 @@ class RealOlcRTCService {
             keyHex,
             socksPort,
             "", // socksUser (empty = no auth)
-            ""  // socksPass
+            "", // socksPass
+            &err
         )
+        if !ok {
+            throw err ?? RealOlcRTCServiceError.startFailed
+        }
     }
 
     func stop() {
@@ -83,10 +118,14 @@ class RealOlcRTCService {
         vp8FPS: Int,
         vp8BatchSize: Int
     ) throws -> Int64 {
-        // Go signature: Check(carrierName, transportName, roomID, clientID, keyHex string, socksPort, timeoutMillis, vp8FPS, vp8BatchSize int) (int64, error)
-        // Obj-C: BOOL MobileCheck(..., int64_t* ret0_, NSError** error)
-        // Swift: try MobileCheck(_:_:_:_:_:_:_:_:_:_:) -> Int64
-        return try MobileCheck(
+        // Obj-C:
+        //   BOOL MobileCheck(NSString* carrierName, NSString* transportName,
+        //                    NSString* roomID, NSString* clientID, NSString* keyHex,
+        //                    long socksPort, long timeoutMillis, long vp8FPS, long vp8BatchSize,
+        //                    int64_t* ret0_, NSError** error);
+        var ret: Int64 = 0
+        var err: NSError?
+        let ok = MobileCheck(
             carrier,
             transport,
             roomID,
@@ -95,8 +134,14 @@ class RealOlcRTCService {
             socksPort,
             timeoutMillis,
             vp8FPS,
-            vp8BatchSize
+            vp8BatchSize,
+            &ret,
+            &err
         )
+        if !ok {
+            throw err ?? RealOlcRTCServiceError.checkFailed
+        }
+        return ret
     }
 
     func ping(
@@ -111,9 +156,14 @@ class RealOlcRTCService {
         vp8FPS: Int,
         vp8BatchSize: Int
     ) throws -> Int64 {
-        // Go signature: Ping(carrierName, transportName, roomID, clientID, keyHex string, socksPort, timeoutMillis int, pingURL string, vp8FPS, vp8BatchSize int) (int64, error)
-        // Swift: try MobilePing(_:_:_:_:_:_:_:_:_:_:_:) -> Int64
-        return try MobilePing(
+        // Obj-C:
+        //   BOOL MobilePing(NSString* carrierName, NSString* transportName,
+        //                   NSString* roomID, NSString* clientID, NSString* keyHex,
+        //                   long socksPort, long timeoutMillis, NSString* pingURL,
+        //                   long vp8FPS, long vp8BatchSize, int64_t* ret0_, NSError** error);
+        var ret: Int64 = 0
+        var err: NSError?
+        let ok = MobilePing(
             carrier,
             transport,
             roomID,
@@ -123,19 +173,35 @@ class RealOlcRTCService {
             timeoutMillis,
             pingURL,
             vp8FPS,
-            vp8BatchSize
+            vp8BatchSize,
+            &ret,
+            &err
         )
+        if !ok {
+            throw err ?? RealOlcRTCServiceError.pingFailed
+        }
+        return ret
     }
 
     func waitReady(timeoutMillis: Int) throws {
-        try MobileWaitReady(timeoutMillis)
+        // Obj-C: BOOL MobileWaitReady(long timeoutMillis, NSError** error);
+        var err: NSError?
+        let ok = MobileWaitReady(timeoutMillis, &err)
+        if !ok {
+            throw err ?? RealOlcRTCServiceError.waitReadyFailed
+        }
     }
 }
 
 /// Swift implementation of the `MobileLogWriter` protocol.
 /// Routes log lines through the sanitizer before forwarding to the app log sink.
+///
+/// `MobileLogWriter` exists in the generated Obj-C as both an
+/// `@interface : NSObject` and a same-named `@protocol`, so Swift's
+/// importer renames the protocol to `MobileLogWriterProtocol`.
 private class SwiftLogWriter: NSObject, MobileLogWriterProtocol {
     private let logSink: (String) -> Void
+    private let sanitizer = LogSanitizer()
 
     init(logSink: @escaping (String) -> Void) {
         self.logSink = logSink
@@ -145,7 +211,7 @@ private class SwiftLogWriter: NSObject, MobileLogWriterProtocol {
     func writeLog(_ msg: String?) {
         guard let msg = msg, !msg.isEmpty else { return }
         // Sanitize before forwarding (per ADR-0010).
-        let sanitized = LogSanitizer.sanitize(msg)
+        let sanitized = sanitizer.sanitize(msg)
         logSink(sanitized)
     }
 }

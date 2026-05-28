@@ -28,8 +28,8 @@ final class LocalProxyManager {
             socksPort: profile.socksPort,
             socksHost: profile.socksHost,
             dnsServer: profile.dnsServer,
-            vp8FPS: profile.vp8FPS,
-            vp8BatchSize: profile.vp8BatchSize,
+            vp8FPS: profile.vp8FPS ?? 30,
+            vp8BatchSize: profile.vp8BatchSize ?? 1,
             livenessIntervalMillis: profile.livenessIntervalMillis,
             livenessTimeoutMillis: profile.livenessTimeoutMillis,
             livenessFailures: profile.livenessFailures,
@@ -55,8 +55,8 @@ final class LocalProxyManager {
             keyHex: profile.keyHex,
             socksPort: profile.socksPort,
             timeoutMillis: timeoutMillis,
-            vp8FPS: profile.vp8FPS,
-            vp8BatchSize: profile.vp8BatchSize
+            vp8FPS: profile.vp8FPS ?? 30,
+            vp8BatchSize: profile.vp8BatchSize ?? 1
         )
     }
 
@@ -70,8 +70,8 @@ final class LocalProxyManager {
             socksPort: profile.socksPort,
             timeoutMillis: timeoutMillis,
             pingURL: pingURL,
-            vp8FPS: profile.vp8FPS,
-            vp8BatchSize: profile.vp8BatchSize
+            vp8FPS: profile.vp8FPS ?? 30,
+            vp8BatchSize: profile.vp8BatchSize ?? 1
         )
     }
 
