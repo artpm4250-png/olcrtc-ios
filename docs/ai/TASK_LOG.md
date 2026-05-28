@@ -9,6 +9,92 @@ Date format: `YYYY-MM-DD`. Each entry should answer **what** changed and
 
 ---
 
+### 2026-05-29 — Probe v2: anchor the OlcRTCMobile link edge against dead-code stripping
+
+- Followup on the `packet-tunnel-gomobile-probe` first run
+  ([run 26600505401](https://github.com/artpm4250-png/olcrtc-ios/actions/runs/26600505401)),
+  which went green but exposed that **`xcodebuild build` succeeding
+  is not the same as the extension actually linking against
+  `OlcRTCMobile.xcframework`**:
+  - The build-step xcodebuild produced
+    `Release-iphoneos/PacketTunnelProvider.appex` clean.
+  - `otool -L` on the extension binary did **not** list
+    `OlcRTCMobile.framework/OlcRTCMobile`.
+  - `nm -u <bin> | grep -c Mobile` returned **0** — i.e. zero
+    undefined symbol references to anything `Mobile`-prefixed.
+  - Root cause: the previous probe lived in a static method on an
+    enum (`GomobileExtensionProbe.touch()`) that was never called
+    from any reachable code path in the extension. Swift's
+    whole-module optimization + dead-code stripping pruned the
+    method, the `import OlcRTCMobile` consumer disappeared with
+    it, and the linker had no reason to record a load command for
+    the framework. The build still passed because the import
+    itself was satisfied — the extension never depended on any
+    symbol that wasn't otherwise reachable.
+- Goal of this followup: make the probe actually **prove the link
+  edge**, and make CI fail the probe if a future change
+  regresses it.
+- Changes in
+  `ios/OlcRTCClient/Sources/PacketTunnelProvider/PacketTunnelProvider.swift`:
+  - Added a stored property
+    `private let _gomobileLinkAnchor: Bool = GomobileExtensionProbe.touch()`
+    gated on `#if canImport(OlcRTCMobile)`. The principal class
+    `PacketTunnelProvider` is reachable from `NSExtensionPrincipalClass`
+    via the Obj-C runtime, so its stored-property initializers
+    run on every instance — which forces the linker to keep
+    `GomobileExtensionProbe.touch()` and the
+    `MobileSetDebug` / `MobileIsRunning` symbols it references.
+  - `startTunnel` body is **unchanged** — it still calls
+    `completionHandler(StubError.notWiredYet)` and runs no
+    olcRTC code. No `MobileStart*` / `MobileCheck` / `MobilePing`
+    call from the extension.
+  - Updated the file-header doc comment to say the extension now
+    links against `OlcRTCMobile.xcframework` via the probe anchor
+    (configure / read-only symbols only) while still being a
+    runtime stub.
+- Changes in `.github/workflows/packet-tunnel-gomobile-probe.yml`:
+  - Renamed `Confirm extension binary actually linked` →
+    `Confirm extension binary actually linked against OlcRTCMobile`
+    and converted the previously-diagnostic `otool -L` /
+    `nm -u | grep -c Mobile` output into **hard assertions**:
+    1. `otool -L "$APPEX/PacketTunnelProvider"` must contain a
+       line matching `OlcRTCMobile.framework/OlcRTCMobile`. If
+       not, the linker did not pull in the framework — fail with
+       a "probe likely got dead-code-stripped" hint.
+    2. `nm -u "$APPEX/PacketTunnelProvider" | grep -c "Mobile"`
+       must be `>= 1` (we expect at least
+       `MobileIsRunning` and `MobileSetDebug` from the probe).
+    This way a future change that, e.g., removes the
+    `_gomobileLinkAnchor` stored property will turn this step red
+    instead of silently going green again.
+  - All other unsigned / no-IPA / no-app-tests scope from the v1
+    probe preserved (`APPLICATION_EXTENSION_API_ONLY = YES`
+    untouched, code signing disabled, entitlements detached,
+    `xcodebuild` flags identical).
+- Doc bookkeeping:
+  - This TASK_LOG entry records the dead-code-stripping discovery
+    so the next session understands why `_gomobileLinkAnchor`
+    exists and does not "clean it up".
+  - `docs/ai/GOMOBILE_BINDINGS.md` "Extension-target linking
+    (probe in progress)" subsection from yesterday already lists
+    "Other `APPLICATION_EXTENSION_API_ONLY` violations" and
+    "undefined symbols at link time" as expected failure modes;
+    the dead-code-stripping mode is an additional one, recorded
+    in-line in `PacketTunnelProvider.swift` and in this entry.
+- Acceptance criterion (probe v2): the
+  `Packet Tunnel Gomobile Probe` workflow goes green AND the
+  `Confirm extension binary actually linked against OlcRTCMobile`
+  step shows `OlcRTCMobile.framework/OlcRTCMobile` in
+  `otool -L` and a non-zero `Mobile`-prefixed undef count.
+- **Not done in this step**, intentionally: any real VPN runtime
+  wiring, any `MobileStart*` call from the extension, any
+  signing, any entitlement attachment, any Go-core change, any
+  new feature, any change to the host-app
+  `iOS App + Gomobile Build` workflow or to the unsigned IPA
+  artifact.
+
+---
+
 ### 2026-05-28 — PacketTunnelProvider gomobile compile/link probe
 
 - Branch: `packet-tunnel-gomobile-probe`. **Probe only**: this step

@@ -11,11 +11,14 @@ import os.log
 ///
 /// - `startTunnel` immediately fails with `notWiredYet`.
 /// - There is no `NEPacketTunnelFlow` plumbing yet.
-/// - There is no Go runtime loaded — `OlcRTCMobile.xcframework` is not
-///   linked into this target yet.
+/// - As of the `packet-tunnel-gomobile-probe` branch the extension
+///   does **link** against `OlcRTCMobile.xcframework`, but only via
+///   `GomobileExtensionProbe.touch()` (configure / read-only
+///   symbols, no network work). The Go runtime is not driven from
+///   here.
 ///
-/// TODO(gomobile): once `OlcRTCMobile.xcframework` is linked, this
-/// class will:
+/// TODO(gomobile): once Milestone 3 of `docs/ROADMAP.md` finishes
+/// the runtime side, this class will:
 ///   1. read `PacketTunnelConfig` from the
 ///      `NETunnelProviderProtocol.providerConfiguration`,
 ///   2. configure `NEPacketTunnelNetworkSettings`,
@@ -42,6 +45,28 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         subsystem: "org.openlibrecommunity.olcrtc.client.PacketTunnelProvider",
         category: "tunnel"
     )
+
+    #if canImport(OlcRTCMobile)
+    /// Compile/link probe anchor — branch
+    /// `packet-tunnel-gomobile-probe`, Milestone 3 in
+    /// `docs/ROADMAP.md`. Initializing this stored property at
+    /// instance init time forces the linker to keep the OlcRTCMobile
+    /// symbol references inside the extension binary, which is what
+    /// proves the extension's compile **and link** path can resolve
+    /// against `OlcRTCMobile.xcframework` under
+    /// `APPLICATION_EXTENSION_API_ONLY = YES`. Without a reachable
+    /// reference like this, Swift dead-code-stripping discards the
+    /// probe and the link edge is silently absent.
+    ///
+    /// `GomobileExtensionProbe.touch()` runs ONLY
+    /// `MobileSetDebug(false)` and `MobileIsRunning()` — both are
+    /// configure / read-only, neither starts any network work. The
+    /// probe does NOT call `MobileStart` / `MobileStartWithTransport`
+    /// / `MobileCheck` / `MobilePing`, does NOT open sockets, and
+    /// does NOT change the behavior of `startTunnel` below
+    /// (which still fails fast with `notWiredYet`).
+    private let _gomobileLinkAnchor: Bool = GomobileExtensionProbe.touch()
+    #endif
 
     override func startTunnel(
         options: [String: NSObject]?,

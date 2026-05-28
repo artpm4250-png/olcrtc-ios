@@ -96,15 +96,16 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             build
 
-      - name: Confirm extension binary actually linked
+      - name: Confirm extension binary actually linked against OlcRTCMobile
         run: |
           set -euo pipefail
           # The host scheme depends on PacketTunnelProvider, so a green
           # build above means the extension's compile + link path
-          # succeeded. Sanity-check the artifact still exists at the
-          # deterministic location for completeness; this guards
-          # against a silent regression where the dependency edge is
-          # dropped from the scheme.
+          # succeeded. We need a stronger check than "the file exists":
+          # if Swift dead-code-strips our probe, the extension still
+          # compiles but the OlcRTCMobile link edge silently disappears
+          # — and we'd be reporting a green probe that didn't actually
+          # exercise the linker. Assert the link edge is real.
           APPEX="build/DerivedData/Build/Products/Release-iphoneos/PacketTunnelProvider.appex"
           if [ ! -d "$APPEX" ]; then
             echo "ERROR: extension bundle missing at $APPEX" >&2
@@ -114,19 +115,43 @@ jobs:
             echo "ERROR: extension binary missing at $APPEX/PacketTunnelProvider" >&2
             exit 1
           fi
-          # Print Mach-O architecture + nm-undefined sample so the log
-          # captures whether the OlcRTCMobile linkage actually
-          # contributed any symbols. We don't FAIL on this — it's a
-          # diagnostic. The probe's source-of-truth pass/fail is the
-          # xcodebuild step above.
+
           file "$APPEX/PacketTunnelProvider"
+
           echo "--- otool -L (libraries linked) ---"
-          otool -L "$APPEX/PacketTunnelProvider" || true
+          otool -L "$APPEX/PacketTunnelProvider"
+
           echo
-          echo "--- nm | grep -c Mobile (count of OlcRTCMobile-prefixed symbol refs) ---"
-          (nm -u "$APPEX/PacketTunnelProvider" 2>/dev/null | grep -c "Mobile") || echo "0"
+          echo "--- nm -u | grep Mobile (count of OlcRTCMobile-prefixed undefined symbol refs) ---"
+          mobile_undef=$(nm -u "$APPEX/PacketTunnelProvider" 2>/dev/null | grep -c "Mobile" || true)
+          echo "$mobile_undef"
+
+          # Hard assertion 1: the extension binary must reference
+          # `OlcRTCMobile.framework` in its load commands. Without
+          # this line in `otool -L`, the linker did not pull in the
+          # framework — i.e. our probe got dead-stripped and we're
+          # reporting a green build that didn't actually exercise the
+          # link edge.
+          if ! otool -L "$APPEX/PacketTunnelProvider" \
+              | grep -q "OlcRTCMobile.framework/OlcRTCMobile"; then
+            echo "ERROR: extension binary does not reference OlcRTCMobile.framework in its load commands." >&2
+            echo "       The probe likely got dead-code-stripped — add a reachable reference and re-run." >&2
+            exit 1
+          fi
+
+          # Hard assertion 2: at least one undefined symbol referencing
+          # something with a `Mobile` prefix (the probe calls
+          # `MobileIsRunning` + `MobileSetDebug`). If both calls got
+          # eliminated, this would be zero — same failure mode as #1
+          # but caught from a different angle.
+          if [ "$mobile_undef" -lt 1 ]; then
+            echo "ERROR: extension binary has zero undefined symbols matching 'Mobile'." >&2
+            echo "       Expected at least MobileIsRunning and MobileSetDebug from the probe." >&2
+            exit 1
+          fi
+
           echo
-          echo "OK: PacketTunnelProvider.appex compiled and linked."
+          echo "OK: PacketTunnelProvider.appex compiled AND linked against OlcRTCMobile (Mobile-prefixed undef count: $mobile_undef)."
 
       - name: Probe summary
         if: always()
