@@ -9,6 +9,128 @@ Date format: `YYYY-MM-DD`. Each entry should answer **what** changed and
 
 ---
 
+### 2026-05-28 — Validate unsigned IPA artifact structure
+
+- Goal: lock in the IPA layout produced by
+  `iOS App + Gomobile Build` so a future change that silently
+  breaks packaging (Xcode embedding the multi-slice `.xcframework`
+  instead of the iphoneos slice, dropping the
+  `PacketTunnelProvider.appex` plug-in, accidentally including a
+  `.dSYM` / `.swiftmodule` / `embedded.mobileprovision`) fails the
+  workflow loudly instead of uploading a subtly-broken artifact.
+  Inspection only — no code-behavior change, no Go-core change, no
+  PacketTunnelProvider wiring, no signing.
+- Manual inspection of the artifact from the latest green run
+  (https://github.com/artpm4250-png/olcrtc-ios/actions/runs/26595550400)
+  via `gh run download` of `OlcRTCClient-unsigned-ipa`. Findings:
+  - The IPA is a plain zip with a single top-level `Payload/`
+    directory, as expected.
+  - Verified `find Payload -maxdepth 5 -print | sort` output:
+    ```
+    Payload
+    Payload/OlcRTCClient.app
+    Payload/OlcRTCClient.app/Frameworks
+    Payload/OlcRTCClient.app/Frameworks/OlcRTCMobile.framework
+    Payload/OlcRTCClient.app/Frameworks/OlcRTCMobile.framework/Info.plist
+    Payload/OlcRTCClient.app/Frameworks/OlcRTCMobile.framework/OlcRTCMobile
+    Payload/OlcRTCClient.app/Info.plist
+    Payload/OlcRTCClient.app/OlcRTCClient
+    Payload/OlcRTCClient.app/PkgInfo
+    Payload/OlcRTCClient.app/PlugIns
+    Payload/OlcRTCClient.app/PlugIns/PacketTunnelProvider.appex
+    Payload/OlcRTCClient.app/PlugIns/PacketTunnelProvider.appex/Info.plist
+    Payload/OlcRTCClient.app/PlugIns/PacketTunnelProvider.appex/PacketTunnelProvider
+    ```
+  - App bundle metadata (from binary `Info.plist`):
+    `CFBundleIdentifier = org.openlibrecommunity.olcrtc.client`,
+    `CFBundleExecutable = OlcRTCClient`,
+    `CFBundleShortVersionString = 0.1.0`,
+    `CFBundleVersion = 1`,
+    `MinimumOSVersion = 16.0`,
+    `DTSDKName = iphoneos18.5`,
+    `CFBundleSupportedPlatforms = [iPhoneOS]`,
+    URL scheme registered: `olcrtc`.
+  - Extension bundle metadata
+    (`PlugIns/PacketTunnelProvider.appex/Info.plist`):
+    `CFBundleIdentifier = org.openlibrecommunity.olcrtc.client.PacketTunnelProvider`,
+    `CFBundleExecutable = PacketTunnelProvider`,
+    `NSExtensionPointIdentifier = com.apple.networkextension.packet-tunnel`,
+    `NSExtensionPrincipalClass = PacketTunnelProvider.PacketTunnelProvider`.
+  - Embedded framework Info.plist
+    (`Frameworks/OlcRTCMobile.framework/Info.plist`):
+    `CFBundleExecutable = OlcRTCMobile`,
+    `CFBundleIdentifier = OlcRTCMobile`,
+    `CFBundlePackageType = FMWK`,
+    `MinimumOSVersion = 100.0` (gomobile default — harmless, since
+    the host app pins `MinimumOSVersion = 16.0` and the iOS loader
+    honors the host's value; this is recorded here so a future
+    reviewer doesn't panic at `100.0`).
+  - Mach-O architectures (`file`):
+    - `OlcRTCClient` — Mach-O arm64 executable (38,176,168 B).
+    - `Frameworks/OlcRTCMobile.framework/OlcRTCMobile` — Mach-O
+      universal w/ 1 arch arm64 dynamically linked shared library
+      (33,128 B).
+    - `PlugIns/PacketTunnelProvider.appex/PacketTunnelProvider` —
+      Mach-O arm64 executable (254,104 B).
+    No simulator slice leaked into the device IPA.
+  - **No** `_CodeSignature/`, `embedded.mobileprovision`,
+    `*.xcframework`, `*.dSYM`, or `*.swiftmodule` directories
+    anywhere in `Payload/` — confirmed via `find`. Unsigned and
+    free of dev-only artifacts, as expected.
+  - **Size note**: the main app binary is ≈38 MB because the Go
+    runtime is statically linked into the host's
+    `OlcRTCClient` Mach-O (gomobile's c-archive flow leaves the
+    framework binary itself tiny at ≈33 KB and lets the host link
+    pull the bulk in). This is expected, not a bug — but worth
+    knowing the next time someone asks "why is the app binary so
+    big and the framework so small?".
+- Changes in `.github/workflows/ios-app-gomobile.yml` (CI now does
+  the same inspection automatically, every run):
+  - New `Inspect and validate unsigned IPA structure` step (runs
+    right after `Upload unsigned IPA artifact`). Steps:
+    1. `unzip` the freshly-built `build/ipa/OlcRTCClient-unsigned.ipa`
+       into `build/ipa-inspect/`.
+    2. Print `find Payload -maxdepth 5 -print | sort`.
+    3. Assert every required path exists (`OlcRTCClient.app`,
+       `Info.plist`, the app binary, `Frameworks/OlcRTCMobile.framework`
+       + its `Info.plist` + its binary, `PlugIns/PacketTunnelProvider.appex`
+       + its `Info.plist` + its binary). Missing path → step fails
+       with the offending path in stderr.
+    4. Assert no forbidden paths exist anywhere in the bundle:
+       any `*.xcframework` directory (would mean a packaging
+       regression where Xcode kept the multi-slice wrapper),
+       any `*.dSYM`, any `*.swiftmodule`, any
+       `embedded.mobileprovision`. Each forbidden hit → step fails
+       with the matched path in stderr.
+    5. Print app / extension / framework `Info.plist` excerpts via
+       `plutil -p` filtered to the keys we care about
+       (`CFBundleIdentifier`, `CFBundleExecutable`,
+       `CFBundleShortVersionString`, `CFBundleVersion`,
+       `MinimumOSVersion`, `DTSDKName`, `DTPlatformVersion`,
+       `CFBundleSupportedPlatforms`, `NSExtensionPointIdentifier`,
+       `NSExtensionPrincipalClass`, `CFBundlePackageType`).
+    6. Print `ls -la` of `Frameworks/` and `PlugIns/`, the byte
+       sizes of all three Mach-O binaries (via `stat -f '%z'`,
+       which is the BSD form available on `macos-latest`), and
+       `file` output for those three binaries so the runner image's
+       Mach-O introspection ends up in the log alongside everything
+       else.
+- Updated `ios/OlcRTCClient/README.md` with a new
+  **"IPA structure (validated by CI)"** subsection under the
+  existing **"Unsigned IPA artifact (CI only)"** section: shows the
+  expected bundle tree, the explicit forbidden-path list, and the
+  size/Go-runtime note from the inspection.
+- Added `ipa-inspect-tmp/` to `.gitignore` so manual artifact
+  downloads done on a dev machine never accidentally get committed.
+  (CI uses `build/ipa-inspect/` which is already ignored by the
+  existing `build/` rule.)
+- **Not done in this step**, intentionally: any code-behavior
+  change; any Go-core change; any wiring of
+  `OlcRTCMobile.xcframework` into `PacketTunnelProvider`; any
+  signing; any new feature.
+
+---
+
 ### 2026-05-28 — Milestone: unsigned IPA artifact packaging green
 
 - Milestone state: `iOS App + Gomobile Build` is green end-to-end and

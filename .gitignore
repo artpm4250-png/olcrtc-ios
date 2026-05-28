@@ -23,6 +23,9 @@ ios/**/Frameworks/OlcRTCMobile.xcframework
 # Build-time inspection reports (uploaded as CI artifact, not committed).
 build/
 
+# Local IPA inspection scratch dir (used by manual artifact review).
+ipa-inspect-tmp/
+
 # Misc local tooling
 .vscode/
 .idea/

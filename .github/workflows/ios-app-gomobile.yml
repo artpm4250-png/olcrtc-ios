@@ -181,6 +181,112 @@ jobs:
           path: build/ipa/OlcRTCClient-unsigned.ipa
           if-no-files-found: error
 
+      - name: Inspect and validate unsigned IPA structure
+        run: |
+          set -euo pipefail
+          IPA="build/ipa/OlcRTCClient-unsigned.ipa"
+          INSPECT_DIR="build/ipa-inspect"
+          rm -rf "$INSPECT_DIR"
+          mkdir -p "$INSPECT_DIR"
+          unzip -q "$IPA" -d "$INSPECT_DIR"
+
+          echo "## IPA tree (Payload, depth 5)"
+          find "$INSPECT_DIR/Payload" -maxdepth 5 -print | sort
+
+          APP="$INSPECT_DIR/Payload/OlcRTCClient.app"
+
+          # --- Required-path assertions (fail fast on any miss). ---
+          for required in \
+            "$APP" \
+            "$APP/Info.plist" \
+            "$APP/OlcRTCClient" \
+            "$APP/Frameworks/OlcRTCMobile.framework" \
+            "$APP/Frameworks/OlcRTCMobile.framework/OlcRTCMobile" \
+            "$APP/Frameworks/OlcRTCMobile.framework/Info.plist" \
+            "$APP/PlugIns/PacketTunnelProvider.appex" \
+            "$APP/PlugIns/PacketTunnelProvider.appex/Info.plist" \
+            "$APP/PlugIns/PacketTunnelProvider.appex/PacketTunnelProvider" \
+          ; do
+            if [ ! -e "$required" ]; then
+              echo "ERROR: missing expected IPA path: $required" >&2
+              exit 1
+            fi
+          done
+
+          # --- Forbidden-path assertions. ---
+          # An .xcframework inside Payload would mean Xcode embedded the
+          # multi-slice wrapper instead of resolving to the iphoneos
+          # slice — that would balloon the IPA and is a real packaging
+          # bug, not a stylistic preference.
+          if find "$APP" -type d -name "*.xcframework" -print | grep -q .; then
+            echo "ERROR: unexpected .xcframework directory inside app bundle:" >&2
+            find "$APP" -type d -name "*.xcframework" -print >&2
+            exit 1
+          fi
+          # Development-only / signed-build artifacts should not appear
+          # in an unsigned CI IPA. If any of these show up the workflow
+          # has drifted and we want to know immediately.
+          for forbidden_glob in \
+            "*.dSYM" \
+            "*.swiftmodule" \
+            "embedded.mobileprovision" \
+          ; do
+            if find "$APP" -name "$forbidden_glob" -print | grep -q .; then
+              echo "ERROR: unexpected $forbidden_glob inside app bundle:" >&2
+              find "$APP" -name "$forbidden_glob" -print >&2
+              exit 1
+            fi
+          done
+
+          # --- Metadata + size readout. ---
+          echo
+          echo "## App bundle metadata"
+          plutil -p "$APP/Info.plist" \
+            | grep -E '"(CFBundleIdentifier|CFBundleExecutable|CFBundleShortVersionString|CFBundleVersion|MinimumOSVersion|DTSDKName|DTPlatformVersion|CFBundleSupportedPlatforms)"' \
+            || true
+
+          echo
+          echo "## Extension bundle metadata"
+          plutil -p "$APP/PlugIns/PacketTunnelProvider.appex/Info.plist" \
+            | grep -E '"(CFBundleIdentifier|CFBundleExecutable|NSExtensionPointIdentifier|NSExtensionPrincipalClass|MinimumOSVersion)"' \
+            || true
+
+          echo
+          echo "## Embedded framework metadata"
+          plutil -p "$APP/Frameworks/OlcRTCMobile.framework/Info.plist" \
+            | grep -E '"(CFBundleIdentifier|CFBundleExecutable|CFBundlePackageType|MinimumOSVersion)"' \
+            || true
+
+          echo
+          echo "## Frameworks/"
+          ls -la "$APP/Frameworks"
+
+          echo
+          echo "## PlugIns/"
+          ls -la "$APP/PlugIns"
+
+          echo
+          echo "## Binary sizes (bytes)"
+          # Use stat-style portable size print (BSD stat on macos-latest).
+          for bin in \
+            "$APP/OlcRTCClient" \
+            "$APP/Frameworks/OlcRTCMobile.framework/OlcRTCMobile" \
+            "$APP/PlugIns/PacketTunnelProvider.appex/PacketTunnelProvider" \
+          ; do
+            size=$(stat -f '%z' "$bin")
+            echo "$size  $bin"
+          done
+
+          echo
+          echo "## Mach-O architectures"
+          file \
+            "$APP/OlcRTCClient" \
+            "$APP/Frameworks/OlcRTCMobile.framework/OlcRTCMobile" \
+            "$APP/PlugIns/PacketTunnelProvider.appex/PacketTunnelProvider"
+
+          echo
+          echo "OK: unsigned IPA structure validated."
+
       - name: Job summary
         if: always()
         run: |

@@ -79,6 +79,44 @@ ADR-0008). The artifact is meant to be consumed by a later signed-build
 pipeline that re-signs and re-packages it, not to be sideloaded onto a
 random device.
 
+### IPA structure (validated by CI)
+
+Every run unpacks the freshly-built `.ipa` and asserts the following
+layout before declaring success — drift in any of these paths fails
+the workflow loudly instead of shipping a broken artifact:
+
+```
+Payload/
+  OlcRTCClient.app/
+    Info.plist
+    OlcRTCClient                                       # main app Mach-O (arm64)
+    PkgInfo
+    Frameworks/
+      OlcRTCMobile.framework/
+        Info.plist
+        OlcRTCMobile                                   # gomobile dylib (arm64)
+    PlugIns/
+      PacketTunnelProvider.appex/
+        Info.plist
+        PacketTunnelProvider                           # extension Mach-O (arm64)
+```
+
+The CI step also asserts the following are **not** present in the
+bundle:
+
+- any `*.xcframework` directory (would mean Xcode embedded the
+  multi-slice wrapper instead of the iphoneos slice);
+- any `*.dSYM` or `*.swiftmodule` directory (development-only);
+- any `embedded.mobileprovision` (signed-build artifact).
+
+Bundle identifiers, version strings, and binary sizes are printed in
+the same step for quick visual confirmation. As of the first validated
+run, the main app binary statically links the Go runtime (≈38 MB),
+while `OlcRTCMobile.framework`'s shared library itself is small
+(≈33 KB) — most Go code ends up in the host binary because the
+framework is built with gomobile's default `-buildmode=c-archive`
+flow, not as a self-contained dylib.
+
 ## What is **not** here today
 
 - The framework is not yet wired into `PacketTunnelProvider`. VPN Mode
