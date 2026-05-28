@@ -180,3 +180,33 @@ jobs:
           name: OlcRTCClient-unsigned-ipa
           path: build/ipa/OlcRTCClient-unsigned.ipa
           if-no-files-found: error
+
+      - name: Job summary
+        if: always()
+        run: |
+          # Write a human-readable summary to the run's Summary tab so
+          # the milestone state (build result, commit, artifact, what is
+          # and is not in this IPA) is visible without scrolling logs.
+          {
+            echo "# iOS App + Gomobile Build"
+            echo
+            echo "- **Result:** ${{ job.status }}"
+            echo "- **Commit:** \`${{ github.sha }}\`"
+            echo "- **Ref:** \`${{ github.ref }}\`"
+            echo "- **Workflow run:** [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+            echo "- **Artifact:** \`OlcRTCClient-unsigned-ipa\` (\`build/ipa/OlcRTCClient-unsigned.ipa\`)"
+            echo
+            echo "## Notes"
+            echo
+            echo "- The unsigned IPA is a **CI / later-signing artifact only**."
+            echo "  It is not expected to install or run a VPN on an ordinary"
+            echo "  iPhone — that requires a paid Apple Developer account, a"
+            echo "  provisioning profile scoped to the \`PacketTunnelProvider\`,"
+            echo "  the \`com.apple.developer.networking.networkextension\`"
+            echo "  entitlement, and a signed build."
+            echo "- The \`PacketTunnelProvider\` runtime is still **stubbed**."
+            echo "  The extension target builds and embeds, but it does not"
+            echo "  link \`OlcRTCMobile.xcframework\` and does not pretend to"
+            echo "  tunnel anything. Local Proxy Mode in the main app target"
+            echo "  is the only path wired to the real gomobile API today."
+          } >> "$GITHUB_STEP_SUMMARY"

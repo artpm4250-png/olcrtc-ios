@@ -9,6 +9,73 @@ Date format: `YYYY-MM-DD`. Each entry should answer **what** changed and
 
 ---
 
+### 2026-05-28 — Milestone: unsigned IPA artifact packaging green
+
+- Milestone state: `iOS App + Gomobile Build` is green end-to-end and
+  now produces the first unsigned IPA artifact from CI. This closes
+  step 7 ("Unsigned `.ipa` packaging step") in the **Next** plan
+  below — the section is left intact for historical context but the
+  IPA item is **done**.
+- Reference run (the first green one with the IPA artifact attached):
+  https://github.com/artpm4250-png/olcrtc-ios/actions/runs/26595108591
+- Artifact: `OlcRTCClient-unsigned-ipa` (≈11 MB, expires per the
+  GitHub Actions default — re-run the workflow to refresh it).
+- Snapshot of what is and is not wired at this milestone:
+  - **Wired**: `OlcRTCMobile.xcframework` built from the upstream
+    submodule, linked into the main app target, Local Proxy Mode
+    talking to the real gomobile API (`Start` / `Stop` / `Check` /
+    `Ping` / `IsRunning` / `WaitReady` / `SetLogWriter`), simulator
+    Debug build green, simulator unit tests green, Release iphoneos
+    generic unsigned build green, validation + Payload zip + IPA
+    artifact upload green.
+  - **Not wired**: `PacketTunnelProvider` runtime (still a
+    `notWiredYet` stub — the extension target compiles and embeds
+    but does not link `OlcRTCMobile.xcframework`), real signing,
+    Apple Developer account, provisioning profile,
+    `com.apple.developer.networking.networkextension` entitlement,
+    re-attached `.entitlements` in `project.yml`.
+- Documentation cleanup landing with this milestone:
+  - Root `README.md` rewritten with an up-to-date **Status (current)**
+    block listing the standalone-repo identity, the
+    `third_party/olcrtc` submodule, the green workflow name, the
+    artifact name, what Local Proxy Mode does today, and the
+    unsigned-IPA caveats.
+  - `.github/workflows/ios-app-gomobile.yml` gained a final
+    `Job summary` step (runs with `if: always()`) that writes the
+    build result, commit SHA, run URL, artifact name, the
+    "CI / later-signing only" caveat, and the "PacketTunnelProvider
+    runtime is still stubbed" caveat to `$GITHUB_STEP_SUMMARY` so
+    the milestone state shows on the run's Summary tab without
+    requiring anyone to scroll the log.
+- Next recommended steps (small, reviewable, in order):
+  1. **Download and inspect the artifact.** Pull
+     `OlcRTCClient-unsigned-ipa` from a green run, unzip it, confirm
+     the `Payload/OlcRTCClient.app` layout, confirm
+     `OlcRTCMobile.framework` is embedded under the app bundle,
+     confirm no `_CodeSignature/` exists, sanity-check `Info.plist`
+     keys. This is read-only verification — no code changes
+     expected.
+  2. **Improve UI/UX and profile import.** Tighten the SwiftUI
+     surface for the Connect / Profiles / Logs / About tabs; finish
+     `olcrtc://` URI import polish; start on subscription import per
+     `docs/sub.md` (HTTPS fetch + parse + merge). Local-only,
+     app-target-only work — no extension wiring yet.
+  3. **Later, evaluate gomobile inside `PacketTunnelProvider`.**
+     Verify `OlcRTCMobile.xcframework` links cleanly under
+     `APPLICATION_EXTENSION_API_ONLY = YES`; if it does, wire
+     `NEPacketTunnelNetworkSettings` + the Go runtime + the
+     `PacketTunnelConfig` handoff in the extension. Real-device
+     runtime is still gated on signing — that is fine for the
+     wiring step; the test is "extension links and starts a Go
+     runtime in a process, not that it tunnels packets on a stock
+     iPhone".
+- **Not done in this step**, intentionally: any code-behavior change,
+  any Go-core edit, any wiring of gomobile into
+  `PacketTunnelProvider`, any signing, any new feature. This is a
+  documentation/status cleanup only.
+
+---
+
 ### 2026-05-28 — Package unsigned IPA artifact in CI
 
 - Goal: after the green Release `iphoneos` generic unsigned build in
