@@ -1,0 +1,107 @@
+name: OlcRTCClient
+options:
+  bundleIdPrefix: org.openlibrecommunity.olcrtc
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+  groupSortPosition: top
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+    TARGETED_DEVICE_FAMILY: "1,2"
+    ENABLE_BITCODE: NO
+    # Unsigned build path — see ADR-0008 in docs/ai/DECISIONS.md.
+    # Real-device VPN runtime requires a paid Apple Developer account,
+    # provisioning profile scoped to the PacketTunnelProvider, and the
+    # com.apple.developer.networking.networkextension entitlement.
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: ""
+    CODE_SIGNING_REQUIRED: NO
+    CODE_SIGNING_ALLOWED: NO
+    DEVELOPMENT_TEAM: ""
+    PROVISIONING_PROFILE_SPECIFIER: ""
+targets:
+  OlcRTCClient:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: Sources/App
+      - path: Sources/Shared
+    info:
+      path: Sources/App/Info.plist
+      properties:
+        CFBundleDisplayName: olcRTC
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        LSApplicationQueriesSchemes:
+          - olcrtc
+        CFBundleURLTypes:
+          - CFBundleURLName: org.openlibrecommunity.olcrtc.url
+            CFBundleURLSchemes:
+              - olcrtc
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.openlibrecommunity.olcrtc.client
+        # Entitlements are intentionally NOT attached in the current
+        # unsigned CI build path. `Sources/App/OlcRTCClient.entitlements`
+        # is kept in the repo as a future-signing reference (App Group +
+        # com.apple.developer.networking.networkextension). When a
+        # signing identity is configured later (see ADR-0008), set:
+        #   CODE_SIGN_ENTITLEMENTS: Sources/App/OlcRTCClient.entitlements
+        # and flip the global CODE_SIGNING_ALLOWED back to YES.
+    dependencies:
+      - target: PacketTunnelProvider
+        embed: true
+        codeSign: false
+  PacketTunnelProvider:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: Sources/PacketTunnelProvider
+      - path: Sources/Shared
+    info:
+      path: Sources/PacketTunnelProvider/Info.plist
+      properties:
+        CFBundleDisplayName: olcRTC Tunnel
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).PacketTunnelProvider
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.openlibrecommunity.olcrtc.client.PacketTunnelProvider
+        # Entitlements detached for the unsigned CI build path — see the
+        # main app target comment above and ADR-0008. The
+        # `PacketTunnelProvider.entitlements` file is kept as a
+        # future-signing reference and gets attached when a signing
+        # identity is configured.
+        APPLICATION_EXTENSION_API_ONLY: YES
+  OlcRTCClientTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: Tests/OlcRTCClientTests
+      - path: Sources/Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.openlibrecommunity.olcrtc.client.tests
+schemes:
+  OlcRTCClient:
+    build:
+      targets:
+        OlcRTCClient: all
+        PacketTunnelProvider: all
+    test:
+      targets:
+        - OlcRTCClientTests

@@ -1,0 +1,77 @@
+name: iOS Scaffold Build
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "ios/OlcRTCClient/**"
+      - "docs/ai/**"
+      - ".github/workflows/ios-scaffold.yml"
+
+# This workflow validates the iOS scaffold only — XcodeGen + SwiftUI
+# app + PacketTunnelProvider target. It does NOT integrate gomobile,
+# does NOT produce a signed or unsigned IPA, and does NOT exercise the
+# Go core. See docs/ai/TASK_LOG.md and ADR-0008 in
+# docs/ai/DECISIONS.md.
+
+jobs:
+  scaffold-build:
+    name: Scaffold Build
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Print Xcode version
+        run: xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: ios/OlcRTCClient
+        run: xcodegen generate
+
+      - name: List schemes
+        run: xcodebuild -list -project ios/OlcRTCClient/OlcRTCClient.xcodeproj
+
+      - name: Build app (unsigned, iphonesimulator)
+        run: |
+          xcodebuild \
+            -project ios/OlcRTCClient/OlcRTCClient.xcodeproj \
+            -scheme OlcRTCClient \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'platform=iOS Simulator,name=iPhone 16' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Run tests (iphonesimulator)
+        run: |
+          xcodebuild \
+            -project ios/OlcRTCClient/OlcRTCClient.xcodeproj \
+            -scheme OlcRTCClient \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'platform=iOS Simulator,name=iPhone 16' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            test
+
+      - name: Build app (unsigned, iphoneos generic)
+        run: |
+          xcodebuild \
+            -project ios/OlcRTCClient/OlcRTCClient.xcodeproj \
+            -scheme OlcRTCClient \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build

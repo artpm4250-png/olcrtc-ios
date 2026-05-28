@@ -1,0 +1,25 @@
+# macOS / Xcode noise
+.DS_Store
+xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcworkspace/xcuserdata/
+*.swp
+
+# Xcode build / DerivedData
+build/
+DerivedData/
+*.xcodeproj/!project.pbxproj
+
+# XcodeGen generates .xcodeproj from project.yml; do not commit it.
+ios/**/*.xcodeproj
+ios/**/*.xcworkspace
+ios/**/Pods/
+ios/**/.build/
+
+# gomobile-built artifacts (added in a later step)
+ios/**/OlcRTCMobile.xcframework
+ios/**/Frameworks/OlcRTCMobile.xcframework
+
+# Misc local tooling
+.vscode/
+.idea/

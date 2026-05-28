@@ -1,0 +1,4 @@
+[submodule "third_party/olcrtc"]
+	path = third_party/olcrtc
+	url = https://github.com/openlibrecommunity/olcrtc.git
+	branch = fix/all
