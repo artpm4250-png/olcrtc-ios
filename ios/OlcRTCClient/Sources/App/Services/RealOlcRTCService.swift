@@ -134,7 +134,7 @@ class RealOlcRTCService {
 
 /// Swift implementation of the `MobileLogWriter` protocol.
 /// Routes log lines through the sanitizer before forwarding to the app log sink.
-private class SwiftLogWriter: NSObject, MobileLogWriter {
+private class SwiftLogWriter: NSObject, MobileLogWriterProtocol {
     private let logSink: (String) -> Void
 
     init(logSink: @escaping (String) -> Void) {
