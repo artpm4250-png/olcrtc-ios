@@ -58,6 +58,38 @@ jobs:
       - name: List schemes
         run: xcodebuild -list -project ios/OlcRTCClient/OlcRTCClient.xcodeproj
 
+      - name: Diagnose simulator availability
+        run: |
+          xcrun simctl list devices available || true
+          xcodebuild -showsdks
+
+      - name: Pick iOS Simulator destination
+        run: |
+          # `xcodebuild test` needs a concrete bootable simulator (a
+          # `generic/platform=iOS Simulator` destination is rejected).
+          # Pick the first available iPhone simulator at runtime so we
+          # don't hardcode a device name that might not be installed on
+          # the GitHub Actions runner image.
+          UDID=$(xcrun simctl list devices available -j 2>/dev/null \
+            | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          for runtime, devs in data.get('devices', {}).items():
+              if 'iOS' not in runtime:
+                  continue
+              for d in devs:
+                  if d.get('isAvailable') and 'iPhone' in d.get('name', ''):
+                      print(d['udid'])
+                      sys.exit(0)
+          " || true)
+          if [ -n "$UDID" ]; then
+            echo "Selected iPhone simulator UDID: $UDID"
+            echo "IOS_SIMULATOR_DESTINATION=platform=iOS Simulator,id=$UDID" >> "$GITHUB_ENV"
+          else
+            echo "No concrete iPhone simulator available, falling back to generic destination."
+            echo "IOS_SIMULATOR_DESTINATION=generic/platform=iOS Simulator" >> "$GITHUB_ENV"
+          fi
+
       - name: Build app (unsigned, Debug, iphonesimulator)
         run: |
           xcodebuild \
@@ -65,7 +97,7 @@ jobs:
             -scheme OlcRTCClient \
             -configuration Debug \
             -sdk iphonesimulator \
-            -destination 'platform=iOS Simulator,name=iPhone 16' \
+            -destination 'generic/platform=iOS Simulator' \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
@@ -78,7 +110,7 @@ jobs:
             -scheme OlcRTCClient \
             -configuration Debug \
             -sdk iphonesimulator \
-            -destination 'platform=iOS Simulator,name=iPhone 16' \
+            -destination "${IOS_SIMULATOR_DESTINATION}" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
