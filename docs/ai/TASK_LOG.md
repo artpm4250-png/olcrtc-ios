@@ -9,6 +9,119 @@ Date format: `YYYY-MM-DD`. Each entry should answer **what** changed and
 
 ---
 
+### 2026-05-28 — PacketTunnelProvider gomobile compile/link probe
+
+- Branch: `packet-tunnel-gomobile-probe`. **Probe only**: this step
+  introduces no runtime behavior change and no new feature. The
+  extension still fails fast with `VPNManagerError.notWiredYet`. We
+  do NOT call `MobileStart` / `MobileStartWithTransport` /
+  `MobileCheck` / `MobilePing` from the extension. We do NOT
+  configure `NEPacketTunnelNetworkSettings` or touch
+  `NEPacketTunnelFlow`. We do NOT add signing or attach
+  entitlements. No IPA packaging in this workflow.
+- Goal: answer one question — can the `PacketTunnelProvider`
+  extension target link against `OlcRTCMobile.xcframework` under
+  `APPLICATION_EXTENSION_API_ONLY = YES`, with code signing
+  disabled, on `macos-latest`? Knowing this is a Milestone-3
+  prerequisite (`docs/ROADMAP.md`). The runtime portion of
+  Milestone 3 stays gated on Milestone 2 (signed build), but the
+  link probe is unblocked today and can run from CI alone.
+- Changes in `ios/OlcRTCClient/project.yml`:
+  - `PacketTunnelProvider` target now adds
+    `Frameworks/OlcRTCMobile.xcframework` as a framework dependency
+    with `embed: false, codeSign: false, link: true`.
+    - `link: true` is what we actually want — the symbols become
+      available to the extension's compile/link step.
+    - `embed: false` is deliberate: the host app already embeds
+      the framework under its own `Frameworks/`, and iOS resolves
+      a single copy at load time via the bundle search path.
+      Embedding it twice would double the IPA's framework payload
+      and risk a code-sign mismatch in a future signed build.
+  - Added `FRAMEWORK_SEARCH_PATHS: $(inherited)
+    $(PROJECT_DIR)/Frameworks` to the extension (same value as
+    the host app) so the linker finds the framework.
+  - Added `OTHER_LDFLAGS: $(inherited) -lresolv` to the extension
+    (mirrors the host app's flag from
+    `docs/ai/GOMOBILE_BINDINGS.md` §4 / `libresolv`). The BSD
+    resolver symbols come from the Go runtime, not from anything
+    app-vs-extension specific, so any target linking
+    OlcRTCMobile needs the flag.
+  - Kept `APPLICATION_EXTENSION_API_ONLY = YES`, kept code signing
+    disabled, kept entitlements detached.
+- New `ios/OlcRTCClient/Sources/PacketTunnelProvider/GomobileExtensionProbe.swift`:
+  - Gated on `#if canImport(OlcRTCMobile)` so scaffold-only builds
+    that don't have the framework keep compiling.
+  - Defines a single internal enum `GomobileExtensionProbe` with a
+    `static func touch() -> Bool` that calls only the
+    configure/read-only symbols `MobileSetDebug(false)` and
+    `MobileIsRunning()`. The Bool return + `@discardableResult`
+    keeps the function body intact under whole-module
+    optimization, so the linker actually pulls in OlcRTCMobile.
+  - **Never called from `startTunnel`**. The principal class
+    `PacketTunnelProvider.startTunnel(options:completionHandler:)`
+    is unchanged and still surfaces `notWiredYet`.
+  - File header documents what this probe is and what it is NOT
+    in detail, so a future reader can't misread the link edge as
+    a runtime hookup.
+- New `.github/workflows/packet-tunnel-gomobile-probe.yml`
+  (workflow name: `Packet Tunnel Gomobile Probe`):
+  - Triggers on push to the `packet-tunnel-gomobile-probe`
+    branch (paths-scoped to relevant inputs) and on
+    `workflow_dispatch`.
+  - Steps: checkout w/ submodules, `setup-go` against the upstream
+    `go.mod`, `brew install xcodegen`, run
+    `scripts/build-gomobile-ios.sh`, `xcodegen generate`,
+    `xcodebuild -list`, then **one** unsigned Release
+    `iphoneos` build of the host scheme.
+  - Building the host scheme exercises the extension's compile +
+    link path because the host scheme already depends on
+    `PacketTunnelProvider: all` (see
+    `ios/OlcRTCClient/project.yml`). We deliberately do NOT add a
+    standalone extension scheme — Xcode does not let you build an
+    app-extension scheme on its own without a host, so a separate
+    scheme would add complexity without probe value.
+  - Post-build `Confirm extension binary actually linked` step
+    asserts
+    `build/DerivedData/Build/Products/Release-iphoneos/PacketTunnelProvider.appex/PacketTunnelProvider`
+    exists, then prints `file` / `otool -L` / a `nm -u | grep -c
+    Mobile` count of OlcRTCMobile-prefixed undefined symbol refs
+    in the extension binary. Diagnostic only — the source-of-truth
+    pass/fail is `xcodebuild build`.
+  - `Probe summary` step writes the result, commit SHA, and what
+    the probe does and does NOT prove to `$GITHUB_STEP_SUMMARY`,
+    with `if: always()` so a red run also produces the summary.
+  - **Not** in this workflow on purpose: IPA packaging, IPA
+    structure validation, host-app tests, simulator builds.
+    Single-purpose so a failure points at one thing.
+- Documentation:
+  - `docs/ROADMAP.md` — Milestone 3 status flipped from
+    `not started` to `in progress`; the first three tasks (link
+    edge in `project.yml`, `libresolv` flag, probe file, probe
+    workflow) marked `[x]`; blockers split into "build/link probe
+    is NOT blocked, runs from CI today" vs "runtime tasks still
+    blocked on Milestone 2".
+  - `docs/ai/GOMOBILE_BINDINGS.md` §4 (libresolv) — note that the
+    flag is now applied to **both** targets. New
+    "Extension-target linking (probe in progress)" subsection
+    enumerates the five expected failure modes (extension-unsafe
+    APIs, undefined symbols, Xcode refusing dynamic frameworks,
+    `APPLICATION_EXTENSION_API_ONLY` violations, unsigned-extension
+    embedding issues) so a red run is easy to triage.
+  - This `TASK_LOG.md` entry.
+- Expected acceptance criterion: `Packet Tunnel Gomobile Probe`
+  workflow runs green on this branch. Green means the extension
+  compiled and linked against OlcRTCMobile under
+  `APPLICATION_EXTENSION_API_ONLY = YES`. **Green does NOT mean**
+  VPN Mode runtime works — the extension still does not start any
+  tunnel.
+- **Not done in this step**, intentionally: real VPN packet
+  routing, any `MobileStart*` call from the extension, any signing
+  or entitlement attachment, any Go-core change, any new feature,
+  any change to the host-app `iOS App + Gomobile Build` workflow
+  or to the unsigned IPA artifact.
+
+---
+
 ### 2026-05-28 — Document MVP release checklist and roadmap
 
 - Goal: capture what the current green state actually guarantees,

@@ -130,8 +130,10 @@ Mode.
 
 ## Milestone 3 — PacketTunnelProvider / gomobile feasibility probe
 
-**Status:** not started. Depends on Milestone 2 (need to run the
-extension on real hardware to know if it boots at all).
+**Status:** **in progress** on branch
+`packet-tunnel-gomobile-probe` (build/link probe only — no runtime
+wiring). The runtime / on-device portion still depends on
+Milestone 2.
 
 **Goal:** verify that `OlcRTCMobile.xcframework` can be linked into
 the `PacketTunnelProvider` extension target under
@@ -140,9 +142,26 @@ process can host the Go runtime without being killed by the iOS
 extension memory budget.
 
 **Tasks:**
-- [ ] Add `Frameworks/OlcRTCMobile.xcframework` as a framework
+- [x] Add `Frameworks/OlcRTCMobile.xcframework` as a framework
       dependency on the extension target in `project.yml`
-      (`embed: true, codeSign: false`).
+      (`embed: false, codeSign: false, link: true` — the host app
+      already owns the embedded copy; the extension only needs the
+      link edge for symbol resolution). Branch
+      `packet-tunnel-gomobile-probe`.
+- [x] Mirror `OTHER_LDFLAGS: $(inherited) -lresolv` from the host
+      app onto the extension target (the Go runtime needs BSD
+      resolver symbols regardless of which target hosts it).
+- [x] Add `Sources/PacketTunnelProvider/GomobileExtensionProbe.swift`
+      that references `MobileIsRunning()` and
+      `MobileSetDebug(false)` so the linker actually pulls in
+      OlcRTCMobile symbols. The probe is **never called from
+      `startTunnel`** — its only job is to force the link edge.
+- [x] Add `.github/workflows/packet-tunnel-gomobile-probe.yml`
+      that runs gomobile bind → XcodeGen → unsigned Release
+      `iphoneos` build of the host scheme (which depends on the
+      extension target), then `otool -L` / `nm -u | grep Mobile`
+      to surface the extension's link footprint. No IPA packaged,
+      no app tests run.
 - [ ] Audit the gomobile-generated headers for any symbol marked
       unavailable to app extensions. If anything trips, isolate it
       behind a thin shim that the extension links against (the
@@ -166,7 +185,11 @@ extension memory budget.
       devices, ~50 MB on newer). Capture peak RSS in `Logs`.
 
 **Blockers:**
-- Milestone 2 (signed build on a real iPhone).
+- The build/link probe (first three tasks) is **not blocked**: it
+  runs entirely from CI on `macos-latest`, unsigned. That's the
+  current `packet-tunnel-gomobile-probe` branch.
+- The runtime tasks (everything below the third `[ ]`) are still
+  blocked on Milestone 2 (signed build on a real iPhone).
 - Possibly an upstream Go-core change if `APPLICATION_EXTENSION_API_ONLY`
   rejects a symbol — Go-core changes go through the upstream repo
   (ADR-0011), not this one.

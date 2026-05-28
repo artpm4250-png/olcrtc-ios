@@ -195,10 +195,67 @@ ADR-0010) is still Swift's job; the bridge is just the raw log line.
   [26592753259](https://github.com/artpm4250-png/olcrtc-ios/actions/runs/26592753259)
   (`ld: Undefined symbols ... _runtime.text in OlcRTCMobile(go.o)`).
   The fix is `OTHER_LDFLAGS: $(inherited) -lresolv` on the linking
-  target. Currently applied to the **main app target only**; when the
-  `PacketTunnelProvider` extension starts linking the framework, it
-  will need the same flag (the symbol comes from gomobile, not from
-  anything app-vs-extension specific).
+  target. Currently applied to **both** the main app target and the
+  `PacketTunnelProvider` extension target (as of the
+  `packet-tunnel-gomobile-probe` branch — see Milestone 3 in
+  `docs/ROADMAP.md`). The symbol comes from the Go runtime, not from
+  anything app-vs-extension specific, so any target that links
+  `OlcRTCMobile.xcframework` needs the flag.
+
+### Extension-target linking (probe in progress)
+
+The `PacketTunnelProvider` extension target also links
+`OlcRTCMobile.xcframework` under `APPLICATION_EXTENSION_API_ONLY =
+YES` as of the `packet-tunnel-gomobile-probe` branch. This is a
+**link probe only** — `Sources/PacketTunnelProvider/GomobileExtensionProbe.swift`
+references `MobileIsRunning()` and `MobileSetDebug(false)` so the
+extension's linker actually pulls in symbols from the framework, but
+the extension's `startTunnel` does NOT call any `MobileStart*` /
+`MobileCheck` / `MobilePing` and does NOT bring up a tunnel.
+
+Known risks the probe is intended to surface (record findings here
+once a CI run is available):
+
+1. **Extension-unsafe APIs from the Go runtime.** With
+   `APPLICATION_EXTENSION_API_ONLY = YES`, the Swift / Obj-C
+   compiler rejects any call into a symbol marked
+   `__API_UNAVAILABLE(app_extension)`. If the Go runtime imports
+   one transitively, the failure surfaces at compile time with a
+   "is unavailable in application extensions" diagnostic naming
+   the symbol.
+2. **Undefined symbols at link time.** Additional BSD / system
+   libraries beyond `libresolv` (e.g. `libnetwork`, `CFNetwork`
+   privates) that the host app already happens to pull in via UI
+   frameworks but the extension does not. Surfaces as
+   `ld: Undefined symbols for architecture arm64: "_<symbol>"`.
+3. **Xcode refusing a dynamic framework inside an app
+   extension.** Less common since iOS 8, but possible if the
+   framework's `Info.plist` or the extension's `Bundle` build
+   settings disagree (e.g. mismatched `MinimumOSVersion`).
+   Surfaces as a `PBXResourcesBuildPhase` / "Embedded binary
+   linker error".
+4. **Other `APPLICATION_EXTENSION_API_ONLY` violations** from the
+   shared Swift sources (`Sources/Shared/Services/*.swift`).
+   `URLSession` is extension-safe; `UIPasteboard` (used by the
+   app's `LogsView`, not by the extension) is not. The shared
+   sources currently only touch Foundation, so this is unlikely,
+   but the probe will catch any regression that pulls in a UI
+   symbol.
+5. **Unsigned extension embedding issues.** With
+   `CODE_SIGNING_ALLOWED=NO` the host app embeds the extension
+   without signing it; some Xcode versions complain about
+   `Embed App Extensions` on `iphoneos` when no identity exists.
+   The host-app pipeline (`iOS App + Gomobile Build`) is already
+   green with this same setting, so we expect this to be a
+   non-issue — but recorded here for completeness.
+
+If the probe's CI run goes red, the first relevant error block
+from `xcodebuild` plus the `otool -L` output of the extension
+binary gets pasted under this section as the verbatim record. If
+the probe goes green, the section is updated to read **"compile
++ link confirmed under APPLICATION_EXTENSION_API_ONLY = YES"**
+plus the workflow run URL, and Milestone 3 in `docs/ROADMAP.md`
+flips its first task to `[x]`.
 
 ---
 
