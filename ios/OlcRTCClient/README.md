@@ -39,20 +39,22 @@ ios/OlcRTCClient/Frameworks/OlcRTCMobile.xcframework
 That path is **ignored by `.gitignore`** and must not be committed.
 It is produced fresh on every CI run by the
 [`Gomobile iOS Bind`](../../.github/workflows/gomobile-ios-bind.yml)
-workflow, which uploads it as a workflow artifact for inspection. The
-companion [`iOS Scaffold Build`](../../.github/workflows/ios-scaffold.yml)
-workflow builds the Swift app **without** the framework today
-(MockOlcRTCService stands in); wiring the framework into both iOS
-targets is a separate later step (see ADR-0001 and the "Next" section
-of [`docs/ai/TASK_LOG.md`](../../docs/ai/TASK_LOG.md)).
+workflow (isolated bind + inspection report) and by the
+[`iOS App + Gomobile Build`](../../.github/workflows/ios-app-gomobile.yml)
+workflow (integrated build: gomobile bind + XcodeGen + xcodebuild).
+
+The framework is currently linked **only** into the main app target
+(`OlcRTCClient`). The `PacketTunnelProvider` extension is still
+stubbed and does NOT link the framework yet — that happens in a later
+step once `APPLICATION_EXTENSION_API_ONLY` compatibility is validated
+(see the "Next" section of
+[`docs/ai/TASK_LOG.md`](../../docs/ai/TASK_LOG.md)).
 
 ## What is **not** here today
 
-- No gomobile-built `OlcRTCMobile.xcframework` checked in. See
-  ADR-0001 and the section above — the framework is built by CI /
-  the bind script and consumed from a gitignored path.
-- The framework is not yet wired into `project.yml` or referenced
-  from the app / extension targets. See the "Next" section of
+- The framework is not yet wired into `PacketTunnelProvider`. VPN Mode
+  is still a compile-time stub.
+- No unsigned `.ipa` packaging yet. See the "Next" section of
   [`docs/ai/TASK_LOG.md`](../../docs/ai/TASK_LOG.md).
 - No code signing identity, no real provisioning profile, no real
   `NetworkExtension` entitlement values. The `.entitlements` files

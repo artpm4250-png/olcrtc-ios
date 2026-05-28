@@ -23,10 +23,18 @@ final class AppState: ObservableObject {
 
     private let store = ProfileStore.shared
     private let sanitizer = LogSanitizer()
+    #if !canImport(OlcRTCMobile)
     private let mock = MockOlcRTCService()
+    #endif
 
     private(set) lazy var vpnManager = VPNManager()
+    #if canImport(OlcRTCMobile)
+    private(set) lazy var localProxy = LocalProxyManager(logSink: { [weak self] line in
+        self?.appendLog(line)
+    })
+    #else
     private(set) lazy var localProxy = LocalProxyManager(service: mock)
+    #endif
 
     init() {
         profiles = store.load()

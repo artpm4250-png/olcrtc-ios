@@ -1,0 +1,98 @@
+name: iOS App + Gomobile Build
+
+# Integrated build: gomobile bind + XcodeGen + xcodebuild for the main
+# app target. This validates that the Swift app can import and call the
+# generated `OlcRTCMobile.xcframework`. The PacketTunnelProvider
+# extension is still stubbed and does NOT link the framework yet (that
+# happens in a later step once APPLICATION_EXTENSION_API_ONLY
+# compatibility is validated).
+#
+# See `docs/ai/TASK_LOG.md` and ADR-0001 / ADR-0011 in
+# `docs/ai/DECISIONS.md`.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "scripts/build-gomobile-ios.sh"
+      - "ios/OlcRTCClient/**"
+      - ".github/workflows/ios-app-gomobile.yml"
+      - ".gitmodules"
+      - "third_party/olcrtc"
+      - "docs/ai/**"
+
+jobs:
+  build:
+    name: iOS App + Gomobile
+    runs-on: macos-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Submodule status
+        run: git submodule status --recursive
+
+      - name: Setup Go (from third_party/olcrtc/go.mod)
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: third_party/olcrtc/go.mod
+          cache: false
+
+      - name: Print Go version
+        run: go version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Build OlcRTCMobile.xcframework
+        run: scripts/build-gomobile-ios.sh
+
+      - name: Generate Xcode project
+        working-directory: ios/OlcRTCClient
+        run: xcodegen generate
+
+      - name: List schemes
+        run: xcodebuild -list -project ios/OlcRTCClient/OlcRTCClient.xcodeproj
+
+      - name: Build app (unsigned, Debug, iphonesimulator)
+        run: |
+          xcodebuild \
+            -project ios/OlcRTCClient/OlcRTCClient.xcodeproj \
+            -scheme OlcRTCClient \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'platform=iOS Simulator,name=iPhone 16' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Run tests (iphonesimulator)
+        run: |
+          xcodebuild \
+            -project ios/OlcRTCClient/OlcRTCClient.xcodeproj \
+            -scheme OlcRTCClient \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'platform=iOS Simulator,name=iPhone 16' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            test
+
+      - name: Build app (unsigned, Release, iphoneos generic)
+        run: |
+          xcodebuild \
+            -project ios/OlcRTCClient/OlcRTCClient.xcodeproj \
+            -scheme OlcRTCClient \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build

@@ -9,7 +9,72 @@ Date format: `YYYY-MM-DD`. Each entry should answer **what** changed and
 
 ---
 
-### 2026-05-28 — Gomobile bind inspection report + bindings doc skeleton
+### 2026-05-28 — Local Proxy Mode wired to real gomobile API
+
+- Goal: replace `MockOlcRTCService` with calls to the real
+  `OlcRTCMobile.xcframework` in the main app target for Local Proxy
+  Mode. PacketTunnelProvider is still stubbed and does NOT link the
+  framework yet (that happens in a later step once
+  `APPLICATION_EXTENSION_API_ONLY` compatibility is validated).
+- Updated `docs/ai/GOMOBILE_BINDINGS.md` with the discovered symbol
+  mapping from workflow run
+  [26588577428](https://github.com/artpm4250-png/olcrtc-ios/actions/runs/26588577428):
+  - Framework name: `OlcRTCMobile.framework`
+  - Module name (Swift `import`): `OlcRTCMobile`
+  - All Go package-level functions surface with a `Mobile` prefix:
+    `MobileSetProviders`, `MobileSetTransport`, `MobileStart`,
+    `MobileStartWithTransport`, `MobileCheck`, `MobilePing`,
+    `MobileStop`, `MobileIsRunning`, `MobileWaitReady`,
+    `MobileSetLogWriter`, etc.
+  - Go `error` → Obj-C `BOOL` return + `NSError**` out-param → Swift
+    throwing function.
+  - Go `(int64, error)` → Obj-C `BOOL` + `int64_t* ret0_` +
+    `NSError**` → Swift `throws -> Int64`.
+  - `MobileLogWriter` protocol exists; Swift implements via a class
+    conforming to it.
+- Added `ios/OlcRTCClient/Sources/App/Services/RealOlcRTCService.swift`:
+  - Only compiled when `#if canImport(OlcRTCMobile)`.
+  - Calls `MobileSetProviders`, `MobileSetTransport`, `MobileSetDNS`,
+    `MobileSetSocksListenHost`, `MobileSetVP8Options`,
+    `MobileSetLivenessOptions`, `MobileSetDebug` before start.
+  - Calls `MobileStartWithTransport` for start,
+    `MobileStop` for stop, `MobileIsRunning` for status,
+    `MobileCheck` for Check, `MobilePing` for Ping.
+  - Implements `MobileLogWriter` in Swift (`SwiftLogWriter`) and
+    routes logs through `LogSanitizer` before forwarding to the app
+    log sink.
+- Updated `ios/OlcRTCClient/Sources/App/Services/LocalProxyManager.swift`:
+  - When `canImport(OlcRTCMobile)`: uses `RealOlcRTCService`.
+  - Otherwise: falls back to `MockOlcRTCService` for scaffold-only
+    builds.
+- Updated `ios/OlcRTCClient/Sources/App/AppState.swift`:
+  - When `canImport(OlcRTCMobile)`: creates `LocalProxyManager` with
+    a log sink that appends to the in-app log buffer.
+  - Otherwise: creates `LocalProxyManager` with `MockOlcRTCService`.
+- Updated `ios/OlcRTCClient/project.yml`:
+  - Added `FRAMEWORK_SEARCH_PATHS: $(inherited) $(PROJECT_DIR)/Frameworks`
+    to the main app target.
+  - Added `OlcRTCMobile.xcframework` as a framework dependency for
+    the main app target (`embed: true, codeSign: false`).
+  - The framework is **not** linked into `PacketTunnelProvider` yet.
+  - The framework is gitignored and must not be committed.
+- Added `.github/workflows/ios-app-gomobile.yml` (`name: iOS App + Gomobile Build`):
+  - Checkout with submodules recursive.
+  - Setup Go from `third_party/olcrtc/go.mod`.
+  - Install XcodeGen.
+  - Run `scripts/build-gomobile-ios.sh`.
+  - Generate Xcode project (`xcodegen generate`).
+  - Build Debug simulator unsigned.
+  - Run tests.
+  - Build Release iphoneos generic unsigned.
+  - Does **not** package IPA yet.
+- Kept the existing `iOS Scaffold Build` and `Gomobile iOS Bind`
+  workflows as isolated checks.
+- **Not done in this step**, intentionally: linking the framework into
+  `PacketTunnelProvider`, VPN Mode runtime, IPA packaging, Go-core
+  changes, signing.
+
+---
 
 - Goal: capture the **real** generated Obj-C / Swift surface of
   `OlcRTCMobile.xcframework` so the next step (wiring `LocalProxyManager`
