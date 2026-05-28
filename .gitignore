@@ -20,6 +20,9 @@ ios/**/.build/
 ios/**/OlcRTCMobile.xcframework
 ios/**/Frameworks/OlcRTCMobile.xcframework
 
+# Build-time inspection reports (uploaded as CI artifact, not committed).
+build/
+
 # Misc local tooling
 .vscode/
 .idea/

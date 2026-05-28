@@ -145,23 +145,169 @@ if [ ! -d "${OUT_FRAMEWORK_ABS}" ]; then
   exit 1
 fi
 
-echo "==> Directory tree of ${OUT_FRAMEWORK_ABS}"
-if command -v tree >/dev/null 2>&1; then
-  tree -a "${OUT_FRAMEWORK_ABS}"
-else
-  # Portable fallback: find with depth + sort.
-  find "${OUT_FRAMEWORK_ABS}" -print | sort
-fi
+# Prepare a reports directory that mirrors what we print to stdout. Both the
+# directory and `OUT_FRAMEWORK_ABS` are uploaded as CI artifacts by the
+# Gomobile iOS Bind workflow; they let the next step (Swift integration)
+# read the real generated symbols instead of guessing.
+REPORT_DIR="${REPO_ROOT}/build/reports/gomobile"
+rm -rf "${REPORT_DIR}"
+mkdir -p "${REPORT_DIR}"
+
+FILES_TXT="${REPORT_DIR}/files.txt"
+HEADERS_TXT="${REPORT_DIR}/headers.txt"
+MODULEMAPS_TXT="${REPORT_DIR}/modulemaps.txt"
+SWIFTINTERFACES_TXT="${REPORT_DIR}/swiftinterfaces.txt"
+SUMMARY_MD="${REPORT_DIR}/summary.md"
+
+HEADER_HEAD_LINES=240
+SWIFTINTERFACE_HEAD_LINES=240
+
+# ---- files.txt (full directory listing, depth-capped at 5) -----------------
+echo "==> Writing ${FILES_TXT}"
+find "${OUT_FRAMEWORK_ABS}" -maxdepth 5 -type f | sort > "${FILES_TXT}"
+
+echo "==> Directory tree of ${OUT_FRAMEWORK_ABS} (echoed to stdout)"
+cat "${FILES_TXT}"
+
+# Helper: emit "==> path\n<first N lines>\n" for each file in $@ to the given
+# report file AND to stdout.
+emit_files_into() {
+  local report_path="$1"; shift
+  local head_lines="$1"; shift
+  : > "${report_path}"
+  if [ "$#" -eq 0 ]; then
+    echo "(none found)" | tee -a "${report_path}"
+    return 0
+  fi
+  for f in "$@"; do
+    {
+      echo "==> ${f}"
+      head -n "${head_lines}" "${f}" || true
+      echo
+    } | tee -a "${report_path}"
+  done
+}
+
+# ---- headers.txt (all .h files, first 240 lines each) ----------------------
+HEADER_FILES=()
+while IFS= read -r path; do
+  [ -n "${path}" ] && HEADER_FILES+=("${path}")
+done < <(find "${OUT_FRAMEWORK_ABS}" -name '*.h' -type f | sort)
 
 echo "==> Generated headers (*.h) inside ${OUT_FRAMEWORK_ABS}"
-find "${OUT_FRAMEWORK_ABS}" -name '*.h' -print | sort || true
+printf '%s\n' "${HEADER_FILES[@]}"
 
-echo "==> Generated Swift module interfaces (*.swiftinterface) inside ${OUT_FRAMEWORK_ABS}"
-SWIFTINTERFACES="$(find "${OUT_FRAMEWORK_ABS}" -name '*.swiftinterface' -print | sort || true)"
-if [ -n "${SWIFTINTERFACES}" ]; then
-  echo "${SWIFTINTERFACES}"
+echo "==> Writing ${HEADERS_TXT} (first ${HEADER_HEAD_LINES} lines per header)"
+emit_files_into "${HEADERS_TXT}" "${HEADER_HEAD_LINES}" "${HEADER_FILES[@]}"
+
+# ---- modulemaps.txt (all module.modulemap files, full contents) ------------
+MODULEMAP_FILES=()
+while IFS= read -r path; do
+  [ -n "${path}" ] && MODULEMAP_FILES+=("${path}")
+done < <(find "${OUT_FRAMEWORK_ABS}" -name 'module.modulemap' -type f | sort)
+
+echo "==> Module maps inside ${OUT_FRAMEWORK_ABS}"
+printf '%s\n' "${MODULEMAP_FILES[@]}"
+
+echo "==> Writing ${MODULEMAPS_TXT} (full contents)"
+: > "${MODULEMAPS_TXT}"
+if [ "${#MODULEMAP_FILES[@]}" -eq 0 ]; then
+  echo "(none found)" | tee -a "${MODULEMAPS_TXT}"
 else
-  echo "(none — gomobile bind currently produces Objective-C headers, not Swift module interfaces)"
+  for f in "${MODULEMAP_FILES[@]}"; do
+    {
+      echo "==> ${f}"
+      cat "${f}"
+      echo
+    } | tee -a "${MODULEMAPS_TXT}"
+  done
 fi
 
-echo "==> Done. ${OUT_FRAMEWORK_ABS} is gitignored; do not commit it."
+# ---- swiftinterfaces.txt (all *.swiftinterface, first 240 lines each) ------
+SWIFTINTERFACE_FILES=()
+while IFS= read -r path; do
+  [ -n "${path}" ] && SWIFTINTERFACE_FILES+=("${path}")
+done < <(find "${OUT_FRAMEWORK_ABS}" -name '*.swiftinterface' -type f | sort)
+
+echo "==> Generated Swift module interfaces (*.swiftinterface) inside ${OUT_FRAMEWORK_ABS}"
+if [ "${#SWIFTINTERFACE_FILES[@]}" -eq 0 ]; then
+  echo "(none — gomobile bind currently produces Objective-C headers, not Swift module interfaces)"
+else
+  printf '%s\n' "${SWIFTINTERFACE_FILES[@]}"
+fi
+
+echo "==> Writing ${SWIFTINTERFACES_TXT} (first ${SWIFTINTERFACE_HEAD_LINES} lines per file)"
+emit_files_into "${SWIFTINTERFACES_TXT}" "${SWIFTINTERFACE_HEAD_LINES}" "${SWIFTINTERFACE_FILES[@]}"
+
+# ---- summary.md (high-level findings, parsed mechanically) -----------------
+# Best-effort: pick the *first* discovered xcframework slice (e.g. ios-arm64),
+# extract framework name + module name + a list of declared @interface /
+# function names from the public header. This is intentionally conservative —
+# the authoritative source is docs/ai/GOMOBILE_BINDINGS.md, which is updated
+# from these reports after a green CI run.
+FIRST_FRAMEWORK_DIR="$(find "${OUT_FRAMEWORK_ABS}" -mindepth 2 -maxdepth 2 -name '*.framework' -type d | sort | head -n 1 || true)"
+FRAMEWORK_NAME=""
+PRIMARY_HEADER=""
+PRIMARY_MODULEMAP=""
+INTERFACE_LINES=""
+FUNCTION_LINES=""
+if [ -n "${FIRST_FRAMEWORK_DIR}" ]; then
+  FRAMEWORK_NAME="$(basename "${FIRST_FRAMEWORK_DIR}" .framework)"
+  PRIMARY_HEADER="$(find "${FIRST_FRAMEWORK_DIR}/Headers" -name '*.h' -type f 2>/dev/null | sort | head -n 1 || true)"
+  PRIMARY_MODULEMAP="$(find "${FIRST_FRAMEWORK_DIR}/Modules" -name 'module.modulemap' -type f 2>/dev/null | sort | head -n 1 || true)"
+  if [ -n "${PRIMARY_HEADER}" ]; then
+    INTERFACE_LINES="$(grep -E '^@interface ' "${PRIMARY_HEADER}" || true)"
+    FUNCTION_LINES="$(grep -E '^(FOUNDATION_EXPORT|extern) ' "${PRIMARY_HEADER}" || true)"
+  fi
+fi
+
+{
+  echo "# gomobile bind — generated artifacts summary"
+  echo
+  echo "Written by \`scripts/build-gomobile-ios.sh\` after a successful"
+  echo "\`gomobile bind -target=ios\`. This file is **mechanical** — the"
+  echo "curated mapping lives in \`docs/ai/GOMOBILE_BINDINGS.md\`, which is"
+  echo "updated by hand from these reports."
+  echo
+  echo "## xcframework"
+  echo
+  echo "- path: \`${OUT_FRAMEWORK_ABS#${REPO_ROOT}/}\`"
+  echo "- first framework slice: \`${FIRST_FRAMEWORK_DIR#${REPO_ROOT}/}\`"
+  echo "- framework name: \`${FRAMEWORK_NAME}\`"
+  echo "- primary header: \`${PRIMARY_HEADER#${REPO_ROOT}/}\`"
+  echo "- module map: \`${PRIMARY_MODULEMAP#${REPO_ROOT}/}\`"
+  echo
+  echo "## @interface declarations (primary header)"
+  echo
+  if [ -n "${INTERFACE_LINES}" ]; then
+    echo '```objc'
+    echo "${INTERFACE_LINES}"
+    echo '```'
+  else
+    echo "_(none discovered by grep on the primary header)_"
+  fi
+  echo
+  echo "## FOUNDATION_EXPORT / extern declarations (primary header)"
+  echo
+  if [ -n "${FUNCTION_LINES}" ]; then
+    echo '```objc'
+    echo "${FUNCTION_LINES}"
+    echo '```'
+  else
+    echo "_(none discovered by grep on the primary header)_"
+  fi
+  echo
+  echo "## Companion reports"
+  echo
+  echo "- \`files.txt\` — full file listing inside the xcframework."
+  echo "- \`headers.txt\` — first ${HEADER_HEAD_LINES} lines of every \`*.h\`."
+  echo "- \`modulemaps.txt\` — full contents of every \`module.modulemap\`."
+  echo "- \`swiftinterfaces.txt\` — first ${SWIFTINTERFACE_HEAD_LINES} lines of every \`*.swiftinterface\` (empty if gomobile only emitted Obj-C)."
+} > "${SUMMARY_MD}"
+
+echo "==> Wrote ${SUMMARY_MD}"
+echo "----- begin ${SUMMARY_MD} -----"
+cat "${SUMMARY_MD}"
+echo "----- end ${SUMMARY_MD} -----"
+
+echo "==> Done. ${OUT_FRAMEWORK_ABS} and ${REPORT_DIR} are gitignored; do not commit them."

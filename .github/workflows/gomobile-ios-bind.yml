@@ -60,3 +60,14 @@ jobs:
           name: OlcRTCMobile-xcframework
           path: ios/OlcRTCClient/Frameworks/OlcRTCMobile.xcframework
           if-no-files-found: error
+
+      - name: Upload gomobile inspection report artifact
+        # Mechanical dump of the generated framework (files, headers,
+        # module maps, swiftinterfaces, and a summary.md). Feeds
+        # docs/ai/GOMOBILE_BINDINGS.md by hand on the next pass — do
+        # not guess symbol names from training data; read the report.
+        uses: actions/upload-artifact@v4
+        with:
+          name: gomobile-inspection-report
+          path: build/reports/gomobile
+          if-no-files-found: error

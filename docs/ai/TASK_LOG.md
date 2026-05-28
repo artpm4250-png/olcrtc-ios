@@ -9,7 +9,50 @@ Date format: `YYYY-MM-DD`. Each entry should answer **what** changed and
 
 ---
 
-### 2026-05-28 — First gomobile bind attempt failed; bind moved inside upstream module
+### 2026-05-28 — Gomobile bind inspection report + bindings doc skeleton
+
+- Goal: capture the **real** generated Obj-C / Swift surface of
+  `OlcRTCMobile.xcframework` so the next step (wiring `LocalProxyManager`
+  to the real Go API) does not guess symbol names. `gomobile bind`
+  applies its own name-mangling (package prefix, exported-method
+  casing, error/multi-return flattening); the only reliable source of
+  truth is the generated headers/module maps themselves.
+- `scripts/build-gomobile-ios.sh` now, after a successful
+  `gomobile bind`, also writes a mechanical inspection bundle to
+  `build/reports/gomobile/`:
+  - `files.txt` — `find -maxdepth 5 -type f` of the xcframework.
+  - `headers.txt` — first 240 lines of every `*.h` inside the
+    xcframework.
+  - `modulemaps.txt` — full content of every `module.modulemap`.
+  - `swiftinterfaces.txt` — first 240 lines of every
+    `*.swiftinterface` (empty when gomobile only emits Obj-C, which
+    is the current default).
+  - `summary.md` — a parsed view of the first framework slice
+    (framework name, primary header, module map path, grep'd
+    `@interface` / `FOUNDATION_EXPORT` / `extern` declarations).
+  All five reports are also echoed to stdout, so CI logs are
+  self-contained for quick triage.
+- `.github/workflows/gomobile-ios-bind.yml` now uploads **two**
+  artifacts on a successful run:
+  - `OlcRTCMobile-xcframework` — the framework (unchanged).
+  - `gomobile-inspection-report` — the contents of
+    `build/reports/gomobile/`.
+- Added `.gitignore` entry for `build/` so the reports stay
+  uncommitted; they live in CI artifacts, not in the repo.
+- Added `docs/ai/GOMOBILE_BINDINGS.md` — the curated reference for
+  the iOS bindings. The first commit only contains the **skeleton**
+  (Go-side surface + sections to fill in + refresh procedure); the
+  follow-up commit will paste in the verbatim symbol names from the
+  `gomobile-inspection-report` artifact of the green CI run, so we
+  record real names rather than guesses.
+- **Not done in this step**, intentionally: wiring
+  `OlcRTCMobile.xcframework` into `project.yml`, calling Go from
+  `LocalProxyManager` / the extension, IPA packaging, any Go-core
+  changes, any Swift-side compile validation of the symbol mapping
+  (that happens in the next step once the symbol names are
+  recorded).
+
+---
 
 - First run of `Gomobile iOS Bind` failed at the
   `Build OlcRTCMobile.xcframework` step. Root cause from the workflow
@@ -467,17 +510,21 @@ Do not pre-implement these in this step.
 Ordered by intended sequence. Each item should be a separate change /
 session so the diff stays reviewable.
 
-1. **Trigger and stabilize `Gomobile iOS Bind`.** Push the script +
-   workflow, watch the first run, capture the exact error if
-   `actions/setup-go@v5` cannot resolve the requested Go version or
-   if `gomobile bind` rejects a Go construct in `./mobile`. Record
-   the green run URL in this file. **Do not** wire the framework
-   into the Swift project until this workflow is green.
-2. **Wire the xcframework into both iOS targets.** Update
-   `project.yml` to add `OlcRTCMobile.xcframework` as a dependency for
-   `OlcRTCClient` and `PacketTunnelProvider`. Replace
-   `MockOlcRTCService` calls in `LocalProxyManager` with the real
-   gomobile bridge. The scaffold workflow grows (or a sibling
+1. **Refresh `docs/ai/GOMOBILE_BINDINGS.md` from the green
+   `Gomobile iOS Bind` artifact.** Download
+   `gomobile-inspection-report` from the run that includes the new
+   inspection step, paste the verbatim framework / module / symbol
+   names into `GOMOBILE_BINDINGS.md`, commit. **Do not** wire Swift
+   to anything until this file records the real names.
+2. **Wire Local Proxy Mode to the real gomobile API.** With the
+   refreshed bindings doc in hand, update `project.yml` to add
+   `OlcRTCMobile.xcframework` as a dependency for `OlcRTCClient`
+   (and, where it links cleanly under
+   `APPLICATION_EXTENSION_API_ONLY: YES`, for
+   `PacketTunnelProvider`). Replace `MockOlcRTCService` calls in
+   `LocalProxyManager` with `Start` / `Stop` / `Check` / `Ping` /
+   `IsRunning` / `WaitReady` / `SetLogWriter` from the real
+   bindings. The scaffold workflow grows (or a sibling
    `ios-build.yml` workflow appears) that runs the gomobile bind
    before `xcodegen generate`.
 3. **Profile store in App Group container.** Move `ProfileStore` from
@@ -488,23 +535,20 @@ session so the diff stays reviewable.
    path stays "future-signing".
 4. **Subscription import** per `docs/sub.md`. HTTPS fetch + parse
    + merge into the shared profile store.
-5. **Local Proxy Mode end-to-end.** Replace the stub call path with
-   the real gomobile `Start` / `Stop` / `Check` / `Ping`. SOCKS
-   endpoint display already wired; just feed real values through.
-6. **VPN Mode plumbing.** Real `NETunnelProviderManager` install /
+5. **VPN Mode plumbing.** Real `NETunnelProviderManager` install /
    enable / observe in `VPNManager`. In the extension, configure
    `NEPacketTunnelNetworkSettings`, bring up the Go runtime against
    the selected `PacketTunnelConfig`, bridge `NEPacketTunnelFlow`.
    Real-device runtime is still gated on signing — that is fine for
    this step.
-7. **Sanitized log view in-extension.** Currently `LogSanitizer` is
+6. **Sanitized log view in-extension.** Currently `LogSanitizer` is
    compiled into both targets but only the app exposes a UI. Once
    the extension produces real logs, mirror them into the App
    Group so the app UI can show them.
-8. **Unsigned `.ipa` packaging step.** Once gomobile is wired,
+7. **Unsigned `.ipa` packaging step.** Once gomobile is wired,
    extend the build workflow to package an unsigned `.ipa` and
    upload it as a workflow artifact (ADR-0008).
-9. **(Future, gated on signing)** A separate signed-build pipeline
+8. **(Future, gated on signing)** A separate signed-build pipeline
    once an Apple Developer account, provisioning profile, and
    `NetworkExtension` entitlement are available. New ADR before
    any code lands. Reattaching the `.entitlements` files happens
