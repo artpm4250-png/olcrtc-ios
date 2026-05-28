@@ -170,7 +170,9 @@ echo "==> Directory tree of ${OUT_FRAMEWORK_ABS} (echoed to stdout)"
 cat "${FILES_TXT}"
 
 # Helper: emit "==> path\n<first N lines>\n" for each file in $@ to the given
-# report file AND to stdout.
+# report file AND to stdout. Tolerates being called with zero file arguments
+# under `set -u` (macOS bash 3.2 treats `"${arr[@]}"` on an empty array as an
+# unbound expansion, so callers use the `${arr[@]+...}` guard).
 emit_files_into() {
   local report_path="$1"; shift
   local head_lines="$1"; shift
@@ -195,10 +197,14 @@ while IFS= read -r path; do
 done < <(find "${OUT_FRAMEWORK_ABS}" -name '*.h' -type f | sort)
 
 echo "==> Generated headers (*.h) inside ${OUT_FRAMEWORK_ABS}"
-printf '%s\n' "${HEADER_FILES[@]}"
+if [ "${#HEADER_FILES[@]}" -gt 0 ]; then
+  printf '%s\n' "${HEADER_FILES[@]}"
+else
+  echo "(none found)"
+fi
 
 echo "==> Writing ${HEADERS_TXT} (first ${HEADER_HEAD_LINES} lines per header)"
-emit_files_into "${HEADERS_TXT}" "${HEADER_HEAD_LINES}" "${HEADER_FILES[@]}"
+emit_files_into "${HEADERS_TXT}" "${HEADER_HEAD_LINES}" ${HEADER_FILES[@]+"${HEADER_FILES[@]}"}
 
 # ---- modulemaps.txt (all module.modulemap files, full contents) ------------
 MODULEMAP_FILES=()
@@ -207,7 +213,11 @@ while IFS= read -r path; do
 done < <(find "${OUT_FRAMEWORK_ABS}" -name 'module.modulemap' -type f | sort)
 
 echo "==> Module maps inside ${OUT_FRAMEWORK_ABS}"
-printf '%s\n' "${MODULEMAP_FILES[@]}"
+if [ "${#MODULEMAP_FILES[@]}" -gt 0 ]; then
+  printf '%s\n' "${MODULEMAP_FILES[@]}"
+else
+  echo "(none found)"
+fi
 
 echo "==> Writing ${MODULEMAPS_TXT} (full contents)"
 : > "${MODULEMAPS_TXT}"
@@ -237,7 +247,7 @@ else
 fi
 
 echo "==> Writing ${SWIFTINTERFACES_TXT} (first ${SWIFTINTERFACE_HEAD_LINES} lines per file)"
-emit_files_into "${SWIFTINTERFACES_TXT}" "${SWIFTINTERFACE_HEAD_LINES}" "${SWIFTINTERFACE_FILES[@]}"
+emit_files_into "${SWIFTINTERFACES_TXT}" "${SWIFTINTERFACE_HEAD_LINES}" ${SWIFTINTERFACE_FILES[@]+"${SWIFTINTERFACE_FILES[@]}"}
 
 # ---- summary.md (high-level findings, parsed mechanically) -----------------
 # Best-effort: pick the *first* discovered xcframework slice (e.g. ios-arm64),
