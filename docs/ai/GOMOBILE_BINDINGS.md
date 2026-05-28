@@ -186,6 +186,19 @@ ADR-0010) is still Swift's job; the bridge is just the raw log line.
   `_Nullable`, so Swift can pass `nil`. The Go side treats
   `w == nil` as a no-op (resets to default `log.SetOutput`), so this
   is safe.
+- **`libresolv` is required** for any target that links
+  `OlcRTCMobile.xcframework`. The Go runtime/stdlib references the
+  BSD resolver symbols `_res_9_nclose`, `_res_9_ninit`, and
+  `_res_9_nsearch`, which live in `libresolv.tbd` on iOS and are
+  **not** linked by default. Discovered during the Debug
+  iphonesimulator link in workflow run
+  [26592753259](https://github.com/artpm4250-png/olcrtc-ios/actions/runs/26592753259)
+  (`ld: Undefined symbols ... _runtime.text in OlcRTCMobile(go.o)`).
+  The fix is `OTHER_LDFLAGS: $(inherited) -lresolv` on the linking
+  target. Currently applied to the **main app target only**; when the
+  `PacketTunnelProvider` extension starts linking the framework, it
+  will need the same flag (the symbol comes from gomobile, not from
+  anything app-vs-extension specific).
 
 ---
 

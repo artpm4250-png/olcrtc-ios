@@ -9,6 +9,42 @@ Date format: `YYYY-MM-DD`. Each entry should answer **what** changed and
 
 ---
 
+### 2026-05-28 — Link `libresolv` for OlcRTCMobile app target
+
+- Goal: get `iOS App + Gomobile Build` past the Debug iphonesimulator
+  link step. After the Swift compile errors were fixed
+  ([run 26592753259](https://github.com/artpm4250-png/olcrtc-ios/actions/runs/26592753259)),
+  Swift compiled clean but `ld` failed with:
+
+  ```
+  Undefined symbols for architecture x86_64:
+    "_res_9_nclose", referenced from: _runtime.text in OlcRTCMobile(go.o)
+    "_res_9_ninit",  referenced from: _runtime.text in OlcRTCMobile(go.o)
+    "_res_9_nsearch", referenced from: _runtime.text in OlcRTCMobile(go.o)
+  ld: symbol(s) not found for architecture x86_64
+  ```
+
+  These are BSD resolver symbols. The Go runtime/stdlib (inside the
+  gomobile-built `OlcRTCMobile.xcframework`) references them, but iOS
+  does not link `libresolv` by default. The host target has to.
+- Fix: `ios/OlcRTCClient/project.yml` now sets
+  `OTHER_LDFLAGS: $(inherited) -lresolv` on the **main app target
+  only**. The `PacketTunnelProvider` extension is not yet linked to
+  `OlcRTCMobile.xcframework`, so it does not need the flag today —
+  when the extension starts linking the framework (a later step), the
+  same flag will be added there.
+- Did **not** restrict simulator architectures (`EXCLUDED_ARCHS`,
+  `VALID_ARCHS`, etc.) to mask the symptom on x86_64 — both simulator
+  slices must keep linking so the same fix works for arm64-only
+  device builds.
+- Updated `docs/ai/GOMOBILE_BINDINGS.md` section 4 with the
+  `libresolv` requirement and the discovery context.
+- **Not done in this step**, intentionally: linking
+  `OlcRTCMobile.xcframework` into `PacketTunnelProvider`, IPA
+  packaging, Go-core changes, signing.
+
+---
+
 ### 2026-05-28 — Fix Swift gomobile service integration compile errors
 
 - Goal: get `iOS App + Gomobile Build` past the `Build app (Debug,
