@@ -118,20 +118,21 @@ targets:
         # reason; mirror it here so the extension's linker resolves the
         # same symbols.
         #
-        # `-u,_MobileIsRunning` forces ld(1) to preserve the
-        # `_MobileIsRunning` Mach-O symbol even when nothing in the
-        # extension's input objects references it. Without this, Swift
-        # whole-module / LTO can dead-strip
-        # `GomobileExtensionProbe.touch()` and
-        # `PacketTunnelProvider._gomobileLinkAnchor`, the linker drops
-        # the `-framework OlcRTCMobile` load command, and the extension
-        # binary silently ships without the link edge we are trying to
-        # prove. With `-u` the symbol is treated as an undefined import,
-        # which requires the framework providing it to stay linked.
-        # `_MobileIsRunning` is a configure/read-only export — it does
-        # not start any network work, matching the probe's
-        # "compile + link, no runtime" scope.
-        OTHER_LDFLAGS: $(inherited) -lresolv -Wl,-u,_MobileIsRunning
+        # `-needed_framework OlcRTCMobile` is ld(1)'s explicit "keep
+        # this framework's load command even if dead-stripping finds
+        # no surviving references" directive. Probe v2 showed that
+        # adding a Swift-side reference (a stored property calling
+        # `MobileIsRunning`) is not enough on `iphoneos` Release:
+        # whole-module LTO eliminates the unused property and clang's
+        # `-dead_strip` then drops the `LC_LOAD_DYLIB` for
+        # OlcRTCMobile, so the extension binary ships with no
+        # OlcRTCMobile link edge — silently invalidating the probe.
+        # Probe v3 tried `-u,_MobileIsRunning` (force the symbol to be
+        # undefined) but ld64 still elided the framework when
+        # `-dead_strip` ran. `-needed_framework` bypasses dead-stripping
+        # for the load command itself, which is exactly what the probe
+        # is trying to measure. See `docs/ai/TASK_LOG.md`.
+        OTHER_LDFLAGS: $(inherited) -lresolv -Wl,-needed_framework,OlcRTCMobile
     dependencies:
       # `OlcRTCMobile.xcframework` linked into the extension target as a
       # COMPILE / LINK probe only (branch

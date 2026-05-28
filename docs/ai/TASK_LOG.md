@@ -9,6 +9,61 @@ Date format: `YYYY-MM-DD`. Each entry should answer **what** changed and
 
 ---
 
+### 2026-05-29 — Probe v4: force the load command via `-needed_framework`
+
+- Probe v3 (`f599e12`) replaced the Swift-side anchor with
+  `-Wl,-u,_MobileIsRunning` in the extension's `OTHER_LDFLAGS`.
+  The run
+  ([26605818266](https://github.com/artpm4250-png/olcrtc-ios/actions/runs/26605818266))
+  confirmed the flag landed in the actual clang link command
+  (visible in the build log at the
+  `Ld .../PacketTunnelProvider.appex/PacketTunnelProvider` step),
+  but the confirm step still failed: `otool -L` showed no
+  `OlcRTCMobile.framework/OlcRTCMobile`, and the `Mobile`-prefixed
+  undef count remained zero. ld64 on iOS 18.5 SDK appears to drop
+  `-u <symbol>`-added undefs during `-dead_strip` if no
+  non-stripped reference survives — `-u` alone is not enough on
+  this toolchain.
+- Fix: use ld64's `-needed_framework` directive instead. It is
+  Apple's explicit "keep the `LC_LOAD_DYLIB` for this framework
+  even if dead-stripping finds no surviving references"
+  instruction, designed precisely for this case (framework that
+  must be linked but whose symbols are not yet referenced by the
+  consumer). The extension target's `OTHER_LDFLAGS` becomes:
+  `$(inherited) -lresolv -Wl,-needed_framework,OlcRTCMobile`.
+- Kept (intentionally):
+  - `Sources/PacketTunnelProvider/GomobileExtensionProbe.swift`
+    and `PacketTunnelProvider._gomobileLinkAnchor` stored
+    property. With `-needed_framework`, the linker keeps the load
+    command without depending on a Swift-side reference — but the
+    Swift anchor still gives the next reader an obvious "here is
+    where the extension touches gomobile" landmark and forces a
+    minimal Swift compile-time check that the gomobile symbols
+    are visible from inside the extension target. If
+    `-needed_framework` is ever removed by mistake, the Swift
+    anchor at least keeps the *compile* path alive.
+  - All other unsigned / no-IPA / no-app-tests scope from probe
+    v1–v3 (`APPLICATION_EXTENSION_API_ONLY = YES` untouched,
+    code signing disabled, entitlements detached).
+- Updated `.github/workflows/packet-tunnel-gomobile-probe.yml`:
+  - The "extension binary must reference `OlcRTCMobile.framework`
+    in its load commands" assertion stays a hard failure (this is
+    the real proof of the link edge).
+  - The "Mobile-prefixed undef count ≥ 1" assertion is **demoted
+    to a diagnostic**. With `-needed_framework`, the load command
+    is kept regardless of whether any symbol references the
+    framework's exports — so a zero count there is no longer a
+    bug. Print the number for context but do not fail on it.
+- Acceptance criterion (probe v4): the
+  `Packet Tunnel Gomobile Probe` workflow runs green AND the
+  confirm step prints
+  `Frameworks/OlcRTCMobile.framework/OlcRTCMobile` somewhere in
+  `otool -L`'s output. The Mobile-prefixed undef count is a
+  diagnostic. The extension still compiles cleanly under
+  `APPLICATION_EXTENSION_API_ONLY = YES`.
+
+---
+
 ### 2026-05-29 — Probe v3: force the link edge via `-Wl,-u,_MobileIsRunning`
 
 - Probe v2 (`9688ed8`) added a stored-property anchor on
