@@ -9,6 +9,64 @@ Date format: `YYYY-MM-DD`. Each entry should answer **what** changed and
 
 ---
 
+### 2026-05-29 — Probe v3: force the link edge via `-Wl,-u,_MobileIsRunning`
+
+- Probe v2 (`9688ed8`) added a stored-property anchor on
+  `PacketTunnelProvider` and turned the CI confirm-step assertions
+  into hard failures. The run
+  ([26602034273](https://github.com/artpm4250-png/olcrtc-ios/actions/runs/26602034273))
+  passed the build step but **failed** the confirm step exactly as
+  intended — `otool -L` had no `OlcRTCMobile.framework`,
+  `nm -u | grep -c Mobile = 0`. Reading the link command in the
+  log:
+  ```
+  clang ... -fapplication-extension ... -dead_strip ...
+        -lresolv -framework OlcRTCMobile ...
+  ```
+  shows that even with the Swift stored-property anchor, clang's
+  `-dead_strip` (always on for `iphoneos` Release) saw no
+  surviving reference into `OlcRTCMobile`'s symbol table from the
+  extension's object files (Swift whole-module / LTO eliminated
+  the unused `_gomobileLinkAnchor` body). With nothing referenced,
+  the linker dropped the `LC_LOAD_DYLIB` for `OlcRTCMobile.framework`.
+- Fix: extend the extension target's `OTHER_LDFLAGS` from
+  `$(inherited) -lresolv` to
+  `$(inherited) -lresolv -Wl,-u,_MobileIsRunning`. The `-u
+  <symbol>` ld(1) flag forces the named Mach-O symbol to be
+  treated as an undefined import — which makes the linker keep
+  the load command for the framework that exports it. This is a
+  link-time directive, so Swift / LTO can't optimize it away.
+  - `_MobileIsRunning` is the C-exported name of the gomobile
+    `MobileIsRunning()` symbol (see
+    `docs/ai/GOMOBILE_BINDINGS.md` §2). It is configure /
+    read-only and does not start any network work, matching the
+    probe's "compile + link, no runtime" scope.
+  - The Swift-side anchor (`GomobileExtensionProbe.touch()` +
+    `_gomobileLinkAnchor` stored property on
+    `PacketTunnelProvider`) is intentionally kept. With `-u` in
+    place, dead-stripping can no longer affect the link edge, but
+    the Swift anchor still gives the next reader a place to look
+    when grepping for "extension references gomobile" — and if
+    `-u` is ever removed by mistake, the Swift anchor at least
+    forces a single specialization to compile, which makes the
+    failure mode obvious (zero count → assertion fires).
+- This change is to the extension target's build settings only;
+  no source change, no Swift compile-flag change, no Go-core
+  change, no signing, no entitlement attachment, no IPA
+  packaging difference. The host-app `iOS App + Gomobile Build`
+  workflow is untouched (the host app already references the
+  framework heavily via `LocalProxyManager` →
+  `RealOlcRTCService`, so its link edge was never in doubt).
+- Acceptance criterion (probe v3): same as probe v2 — the
+  `Packet Tunnel Gomobile Probe` workflow runs green AND the
+  `Confirm extension binary actually linked against OlcRTCMobile`
+  step shows `OlcRTCMobile.framework/OlcRTCMobile` in
+  `otool -L` plus a non-zero `Mobile`-prefixed undef count. The
+  difference vs v2 is that the link edge now survives
+  whole-module Swift optimization.
+
+---
+
 ### 2026-05-29 — Probe v2: anchor the OlcRTCMobile link edge against dead-code stripping
 
 - Followup on the `packet-tunnel-gomobile-probe` first run

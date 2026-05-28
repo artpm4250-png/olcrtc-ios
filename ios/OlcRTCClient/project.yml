@@ -117,7 +117,21 @@ targets:
         # app already links it explicitly (see above) for the same
         # reason; mirror it here so the extension's linker resolves the
         # same symbols.
-        OTHER_LDFLAGS: $(inherited) -lresolv
+        #
+        # `-u,_MobileIsRunning` forces ld(1) to preserve the
+        # `_MobileIsRunning` Mach-O symbol even when nothing in the
+        # extension's input objects references it. Without this, Swift
+        # whole-module / LTO can dead-strip
+        # `GomobileExtensionProbe.touch()` and
+        # `PacketTunnelProvider._gomobileLinkAnchor`, the linker drops
+        # the `-framework OlcRTCMobile` load command, and the extension
+        # binary silently ships without the link edge we are trying to
+        # prove. With `-u` the symbol is treated as an undefined import,
+        # which requires the framework providing it to stay linked.
+        # `_MobileIsRunning` is a configure/read-only export — it does
+        # not start any network work, matching the probe's
+        # "compile + link, no runtime" scope.
+        OTHER_LDFLAGS: $(inherited) -lresolv -Wl,-u,_MobileIsRunning
     dependencies:
       # `OlcRTCMobile.xcframework` linked into the extension target as a
       # COMPILE / LINK probe only (branch
