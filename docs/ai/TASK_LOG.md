@@ -9,7 +9,122 @@ Date format: `YYYY-MM-DD`. Each entry should answer **what** changed and
 
 ---
 
-### 2026-05-29 — Probe v12 result: classification = `PASS-STATIC-LINKED`; static-link architecture accepted as ADR-0013
+### 2026-05-29 — Probe v12 cleanup: revert probe-only source/build mutations on `packet-tunnel-gomobile-probe`; isolate the probe workflow as manual-only
+
+- v12 proved the static-link model
+  ([ADR-0013](DECISIONS.md), run
+  [26634679085](https://github.com/artpm4250-png/olcrtc-ios/actions/runs/26634679085),
+  classification `PASS-STATIC-LINKED`). But the v12 source change
+  was probe-only and broke the normal CI workflows on this
+  branch:
+  - `iOS Scaffold Build` does not run `gomobile bind` and does
+    not check out submodules, so the v12 `project.yml` reference
+    to
+    `Frameworks/OlcRTCMobile.xcframework/ios-arm64/OlcRTCMobile.framework/OlcRTCMobile`
+    fails XcodeGen / xcodebuild with "There is no XCFramework
+    found at …".
+  - `iOS App + Gomobile Build` builds for both `iphonesimulator`
+    and `iphoneos`. The v12 `-force_load` path hard-codes
+    `ios-arm64/`, which is the device slice — when the linker
+    runs for the simulator (`x86_64-apple-ios16.0-simulator`),
+    it emits `ld: warning: ignoring file
+    '...ios-arm64/OlcRTCMobile.framework/OlcRTCMobile': fat file
+    missing arch 'x86_64', file has 'arm64'` and then fails the
+    extension link.
+- This entry covers the merge-safety cleanup that follows v12 +
+  ADR-0013 documentation. The branch must not merge into `main`
+  with the probe-only mutations on, so they are reverted and the
+  research workflow is isolated. Findings stay; the ADR
+  describes how to reintroduce them safely on a future runtime
+  branch.
+- Source / build reverts (probe-only):
+  - `ios/OlcRTCClient/project.yml` — `PacketTunnelProvider`
+    target reverted to `main`-parity. Removed the probe-added
+    `LLVM_LTO: NO`, `FRAMEWORK_SEARCH_PATHS:
+    $(inherited) $(PROJECT_DIR)/Frameworks`, the v12
+    `OTHER_LDFLAGS: $(inherited) -lresolv -force_load
+    $(SRCROOT)/Frameworks/OlcRTCMobile.xcframework/ios-arm64/OlcRTCMobile.framework/OlcRTCMobile`,
+    and the `dependencies:` block that linked
+    `Frameworks/OlcRTCMobile.xcframework` into the extension
+    target. The extension is back to the scaffold-only shape:
+    `APPLICATION_EXTENSION_API_ONLY: YES`, no framework
+    dependency, no probe build settings.
+  - `ios/OlcRTCClient/Sources/PacketTunnelProvider/PacketTunnelProvider.swift`
+    — restored to the `main` version. The probe-v9 doc block and
+    `#if canImport(OlcRTCMobile)` /
+    `GomobileExtensionProbe.touchNonStartingAPI()` call inside
+    `startTunnel` are gone; `startTunnel` immediately calls
+    `completionHandler(StubError.notWiredYet)` again.
+  - `ios/OlcRTCClient/Sources/PacketTunnelProvider/GomobileExtensionProbe.swift`
+    — deleted. The file existed only to anchor the link edge
+    during v2–v12; ADR-0013 records what it did and why a future
+    runtime branch will reintroduce equivalent symbol references
+    with proper sdk-aware paths.
+  - `.github/workflows/packet-tunnel-gomobile-probe.yml` —
+    isolated as a research / archival workflow. `on:` trigger is
+    now `workflow_dispatch:` only; the previous `push:` trigger
+    (with `branches: [packet-tunnel-gomobile-probe]` and a path
+    filter for `project.yml` / Sources / etc.) was removed so
+    pushes on this branch never auto-fire it. The header
+    comments now state, in plain language, that the workflow
+    will only pass when the probe-specific `project.yml`
+    mutations are re-applied — running it on a clean
+    main-compatible branch produces `FAIL-NOT-LINKED` /
+    `FAIL-BUILD` because the default extension does not carry
+    Mobile symbols.
+- Documentation kept (no revert):
+  - [`docs/ai/DECISIONS.md`](DECISIONS.md) — ADR-0013 (static
+    linking required for `PacketTunnelProvider`) stays as
+    accepted.
+  - [`docs/ROADMAP.md`](../ROADMAP.md) — Milestone 3 build/link
+    probe is still recorded as complete; Milestone 3.5
+    (`packet-tunnel-runtime-skeleton`) is still queued as the
+    next branch.
+  - [`docs/RELEASE_CHECKLIST.md`](../RELEASE_CHECKLIST.md) —
+    §5 "PacketTunnelProvider gomobile feasibility" stays.
+  - [`docs/ai/GOMOBILE_BINDINGS.md`](GOMOBILE_BINDINGS.md) — §0
+    "Linking model — static, not dynamic" stays.
+  - This file (`TASK_LOG.md`) — the v11 / v12 entries above stay
+    untouched; the cleanup is recorded as its own entry, not by
+    rewriting prior history.
+- Notes for the next runtime branch
+  (`packet-tunnel-runtime-skeleton`):
+  - Reintroduce the static-link settings on the
+    `PacketTunnelProvider` target with **sdk-specific** static
+    archive paths. The v12 path was hard-coded to `ios-arm64/`
+    because the probe only ever built for `iphoneos` Release
+    generic. A runtime branch needs the right slice for both
+    `iphoneos` (`ios-arm64`) and `iphonesimulator`
+    (`ios-arm64_x86_64-simulator`); pick the slice via
+    `$(EFFECTIVE_PLATFORM_NAME)` /
+    `$(PLATFORM_PREFERRED_ARCH)` or use a per-config
+    `OTHER_LDFLAGS[sdk=…]` setting. Not in scope for this
+    cleanup commit.
+  - The runtime branch's CI workflows must run `gomobile bind`
+    before `xcodebuild`, **and** must check out submodules.
+    Today only `iOS App + Gomobile Build` does this; `iOS
+    Scaffold Build` deliberately does not. A runtime branch
+    that depends on the framework cannot be exercised through
+    the scaffold workflow — either fold the scaffold into the
+    integrated workflow, or gate the extension's framework
+    dependency behind a per-config flag that the scaffold
+    workflow can leave off.
+  - Re-add a small probe Swift file (or equivalent C/Obj-C
+    anchor) that references at least one Mobile* symbol so
+    `import OlcRTCMobile` resolves and the link edge is real.
+    Without that, `-force_load` of the static archive still
+    works at the linker step but the Swift compile step has
+    nothing to import. v12 used
+    `GomobileExtensionProbe.touchNonStartingAPI()` for this;
+    keep the same shape and call it from `startTunnel` only
+    after the lifecycle skeleton is in place.
+  - Keep the hard scope from v12 in place: no `MobileStart*`,
+    no `MobileCheck`, no `MobilePing`, no sockets, no
+    `NEPacketTunnelNetworkSettings`, no
+    `NEPacketTunnelFlow`, no signing, no entitlements, no
+    Go-core changes.
+
+---
 
 - Run:
   [`Packet Tunnel Gomobile Probe` 26634679085](https://github.com/artpm4250-png/olcrtc-ios/actions/runs/26634679085)

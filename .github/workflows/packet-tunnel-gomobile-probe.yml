@@ -1,11 +1,27 @@
 name: Packet Tunnel Gomobile Probe
 
-# Compile/link probe (branch `packet-tunnel-gomobile-probe`) — verifies
-# that the `PacketTunnelProvider` extension target can link against
-# `OlcRTCMobile.xcframework` under `APPLICATION_EXTENSION_API_ONLY =
-# YES`. This is an experiment, NOT a packaging or runtime step.
+# Research / archival workflow — branch `packet-tunnel-gomobile-probe`.
+# Records the v2–v12 link probe used to reach ADR-0013
+# (`OlcRTCMobile` is a static framework wrapper; `PacketTunnelProvider`
+# must link it statically, not embed it).
 #
-# Hard scope (see Milestone 3 in `docs/ROADMAP.md`):
+# **Manual-only.** No push triggers. Run this only from
+# `workflow_dispatch` and only after re-applying the probe-specific
+# project.yml mutations described in ADR-0013 / probe v12 (force-load
+# of the `ios-arm64` static archive into the extension target,
+# `LLVM_LTO: NO`, `FRAMEWORK_SEARCH_PATHS` for the extension,
+# `GomobileExtensionProbe` Swift file, etc.). On a clean main-compatible
+# branch this workflow will FAIL — the v12 classifier expects the
+# extension binary to carry `Mobile*` exports, and a default project
+# does not link them.
+#
+# Push-triggered execution was removed in the merge-safety cleanup
+# step that landed alongside ADR-0013. The default-build path now
+# never invokes this probe; it is here as a reproducible recipe for
+# the next runtime branch (`packet-tunnel-runtime-skeleton`) to
+# reintroduce the static-link settings safely.
+#
+# Hard scope (unchanged):
 # - We DO NOT package an IPA here.
 # - We DO NOT call MobileStart / MobileStartWithTransport / MobileCheck
 #   / MobilePing from the extension.
@@ -39,31 +55,20 @@ name: Packet Tunnel Gomobile Probe
 #            stubs. The host app still works because gomobile's
 #            static archive gets linked into the app executable
 #            directly, not embedded as a separate framework.
-#   v12 (this run): mirror the host-app shape for the extension.
-#            Drop `embed: true`, link the static archive into the
+#   v12    : mirror the host-app shape for the extension. Drop
+#            `embed: true`, link the static archive into the
 #            extension executable via `-force_load <archive-path>`
 #            in `OTHER_LDFLAGS`. Inspect the final `.appex` binary
 #            (`otool -L`, `nm -gU` for `Mobile*` exports, `nm -u`
 #            for undefined references, `file`, `du -h`) and the
-#            `.appex/Frameworks/` directory to confirm there is
-#            no `OlcRTCMobile.framework` embedded copy and no
-#            `.xcframework` leak. Classify the build as
-#            `PASS-STATIC-LINKED`, `FAIL-NOT-LINKED`, or
-#            `FAIL-BUILD`.
+#            `.appex/Frameworks/` directory to confirm there is no
+#            `OlcRTCMobile.framework` embedded copy and no
+#            `.xcframework` leak. Classification:
+#            `PASS-STATIC-LINKED` (run 26634679085).
+#            Architecture accepted as ADR-0013.
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - packet-tunnel-gomobile-probe
-    paths:
-      - "scripts/build-gomobile-ios.sh"
-      - "ios/OlcRTCClient/project.yml"
-      - "ios/OlcRTCClient/Sources/PacketTunnelProvider/**"
-      - "ios/OlcRTCClient/Sources/Shared/**"
-      - ".github/workflows/packet-tunnel-gomobile-probe.yml"
-      - ".gitmodules"
-      - "third_party/olcrtc"
 
 jobs:
   probe:

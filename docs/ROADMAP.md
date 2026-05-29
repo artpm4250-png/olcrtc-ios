@@ -140,6 +140,19 @@ wiring, memory-budget stress) still depends on Milestone 2 and
 the next implementation milestone (`packet-tunnel-runtime-skeleton`,
 below).
 
+The probe-only source/build mutations on
+`packet-tunnel-gomobile-probe` (extension `OTHER_LDFLAGS`
+force-load, framework dependency, `LLVM_LTO`,
+`GomobileExtensionProbe.swift`) were **reverted as part of the
+merge-safety cleanup** so the branch can merge into `main` without
+breaking `iOS Scaffold Build` or `iOS App + Gomobile Build`. The
+probe workflow
+(`.github/workflows/packet-tunnel-gomobile-probe.yml`) is now
+`workflow_dispatch`-only and is preserved as a research /
+archival recipe. Reintroducing the static-link settings on the
+runtime branch (`packet-tunnel-runtime-skeleton`) is part of
+Milestone 3.5 — see the notes there.
+
 **Goal:** verify that `OlcRTCMobile.xcframework` can be linked into
 the `PacketTunnelProvider` extension target under
 `APPLICATION_EXTENSION_API_ONLY = YES`, and that the extension
@@ -268,6 +281,25 @@ work in Milestone 4.
 **Branch:** `packet-tunnel-runtime-skeleton`.
 
 **Tasks:**
+- [ ] Reintroduce the static-link settings on the
+      `PacketTunnelProvider` target that the probe branch
+      reverted in its merge-safety cleanup. The v12 form
+      hard-coded `ios-arm64/` in `OTHER_LDFLAGS` and broke
+      `iOS App + Gomobile Build` for the simulator slice. The
+      runtime branch must use sdk-specific paths — either
+      per-config `OTHER_LDFLAGS[sdk=iphoneos*]` /
+      `OTHER_LDFLAGS[sdk=iphonesimulator*]`, or a build setting
+      indirection that resolves to the correct slice
+      (`ios-arm64` for iphoneos, `ios-arm64_x86_64-simulator`
+      for the simulator). Re-add the
+      `Frameworks/OlcRTCMobile.xcframework` extension
+      dependency (`embed: false / link: true / codeSign: false`)
+      and the `-lresolv` flag. Re-add a small Swift / Obj-C
+      anchor file (the v12 `GomobileExtensionProbe.swift`
+      pattern) so `import OlcRTCMobile` resolves in the
+      extension. CI workflows that exercise this branch must
+      run `gomobile bind` before `xcodebuild` and check out
+      submodules.
 - [ ] Define the shared config surface between the app and the
       extension. Likely shape: app writes the selected
       `PacketTunnelConfig` into the App Group container (or
