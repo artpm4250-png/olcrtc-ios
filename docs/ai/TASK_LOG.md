@@ -9,6 +9,143 @@ Date format: `YYYY-MM-DD`. Each entry should answer **what** changed and
 
 ---
 
+### 2026-05-29 — Probe v6 result: classification = `FAIL-STRIPPED-AFTER-LINK`
+
+- Run:
+  [`Packet Tunnel Gomobile Probe` 26628298042](https://github.com/artpm4250-png/olcrtc-ios/actions/runs/26628298042)
+  on commit
+  [`4d179b4`](https://github.com/artpm4250-png/olcrtc-ios/commit/4d179b4).
+  Conclusion: **failure**. The build itself succeeded; the
+  confirm step's classifier produced
+  `FAIL-STRIPPED-AFTER-LINK`.
+- The new section B of the confirm step proved the references
+  reached the linker. From `nm` / `nm -u` on intermediate `.o`
+  files:
+  - `…/PacketTunnelProvider.build/Objects-normal/arm64/PacketTunnelProvider.o`
+    → `U _MobileIsRunning`, `U _MobileSetDebug`. (The Swift
+    object inherits these undefs because the Swift-side
+    `GomobileExtensionProbe.touch()` is still compiled in;
+    that path is harmless documentation now but it carries
+    its own refs into the link.)
+  - `…/PacketTunnelProvider.build/Objects-normal/arm64/GomobileExtensionLinkAnchor.o`
+    → `T _OlcRTCExtensionGomobileLinkAnchor`,
+    `b _OlcRTCGomobileBoolSink`,
+    `d _OlcRTCGomobileIsRunningPtr`,
+    `d _OlcRTCGomobileSetDebugPtr`,
+    `U _MobileIsRunning`, `U _MobileSetDebug`. The v6 C
+    anchor compiled exactly as intended — the per-TU object
+    carries the anchor function, the three static
+    variables, and both gomobile undefs.
+  - Aggregate from section B: `object file count: 12`,
+    `obj_has_mobile_refs: 1`.
+- The final extension binary kept the v6 anchor symbol and
+  all three of its static variables (from section A):
+
+  ```
+  0000000100004000 T _OlcRTCExtensionGomobileLinkAnchor
+  0000000101cd99c0 b _OlcRTCGomobileBoolSink
+  0000000101b95120 d _OlcRTCGomobileIsRunningPtr
+  0000000101b95128 d _OlcRTCGomobileSetDebugPtr
+  ```
+
+  But `nm -u "$APPEX/PacketTunnelProvider" | grep -E 'Mobile(IsRunning|SetDebug)'`
+  is empty, and `otool -L "$APPEX/PacketTunnelProvider"` still
+  has no `Frameworks/OlcRTCMobile.framework/OlcRTCMobile` line.
+  Final-binary signals: `otool_has_olcrtc=0`,
+  `final_mobile_undefs=∅`. The classifier therefore wrote:
+  ```
+  classification: FAIL-STRIPPED-AFTER-LINK
+    otool -L has OlcRTCMobile.framework: 0
+    final binary has Mobile* undef refs: 0
+    intermediate .o has Mobile* undef refs: 1
+    intermediate .o file count: 12
+  ```
+- The captured Ld step (section C) shows the trailing
+  `-framework OlcRTCMobile` from the XcodeGen dependency plus
+  the v6-added `-Wl,-u,_OlcRTCExtensionGomobileLinkAnchor`,
+  `-lresolv`, `-dead_strip`, `-Os`, and
+  `-Xlinker -object_path_lto -Xlinker …PacketTunnelProvider_lto.o`
+  — LTO is on as expected. With v6 the
+  `-Wl,-needed_framework,OlcRTCMobile` flag from v4 is
+  intentionally absent (see v6 plan entry below).
+- Diagnosis. `APPLICATION_EXTENSION_API_ONLY = YES` stayed on
+  (`project.yml:108`); signing stayed disabled; entitlements
+  stayed detached; clang did emit the gomobile undefs into
+  the .o files. The link edge dies in the **ld + LTO** stage:
+  ld_prime nullified the relocations that the static
+  function-pointer initializers should have produced. The
+  storage for `_OlcRTCGomobileIsRunningPtr` and
+  `_OlcRTCGomobileSetDebugPtr` survived (they are in the data
+  segment at `0x101b95120` and `0x101b95128`), but their
+  initializer relocations against `_MobileIsRunning` and
+  `_MobileSetDebug` were not emitted into the final binary's
+  bind table — otherwise `nm -u` would list those symbols
+  and `otool -L` would carry the `LC_LOAD_DYLIB` for
+  OlcRTCMobile. The only plausible mechanism is that
+  ld_prime's whole-program LTO pass, running over the merged
+  bitcode, decided the pointer values are never read in a way
+  that escapes the binary and folded the relocations to zero
+  / a local stub — `__attribute__((used))` keeps the storage,
+  not the initializer's relocation. `optnone` on the anchor
+  function only constrains that function's frontend
+  optimization; LTO is free to reanalyze loads through
+  volatile pointers when generating the final native code.
+- Implication. The defenses that operate at the **clang
+  per-TU stage** (data relocations from static initializers,
+  `__attribute__((used))`, volatile, `optnone`) all worked —
+  the proof is the intermediate `.o` files showing the
+  Mobile* undefs. The defense that has to operate at the
+  **ld / LTO stage** has been the recurring failure across
+  v3, v4, v5, and v6. Three escalation paths remain that
+  attack the LTO layer directly rather than trying to outwit
+  it:
+  - (a) Turn off LTO for the extension target
+    (`LLVM_LTO = NO` in `project.yml` for the
+    `PacketTunnelProvider` target). The downside is the
+    extension binary loses LTO's size optimization, but for
+    a probe target that has no runtime body that is
+    irrelevant.
+  - (b) Bypass the dependency graph entirely: register the
+    references inside an
+    `__attribute__((constructor))` function or an
+    `+load` Objective-C class method, which run at module
+    initialization. Loads inside a constructor are routed
+    through `_dyld_start_func` and are not subject to the
+    same LTO dead-store-elimination heuristics applied to
+    ordinary functions, because the constructor is a
+    visible runtime side effect.
+  - (c) Embed the framework into the extension target too
+    (`embed: true` instead of `embed: false`). Embedding
+    causes XcodeGen to emit a `Copy Files` build phase that
+    requires the framework's reachability independent of
+    LTO. The downside (double-embedded Go runtime, ~33 MB
+    extra in the IPA) is real but bounded for a probe.
+  Linker-only mitigations (`-Wl,-u`, `-needed_framework`)
+  have been exhausted in v3-v5 and would be redundant atop
+  any of (a)/(b)/(c).
+- Files unchanged on disk relative to `4d179b4`:
+  - `ios/OlcRTCClient/Sources/PacketTunnelProvider/GomobileExtensionLinkAnchor.m`
+    — unchanged.
+  - `ios/OlcRTCClient/project.yml` — unchanged
+    (`APPLICATION_EXTENSION_API_ONLY: YES` still on,
+    `OTHER_LDFLAGS: $(inherited) -lresolv -Wl,-u,_OlcRTCExtensionGomobileLinkAnchor`,
+    framework dependency `embed: false / codeSign: false / link: true`,
+    signing disabled, entitlements detached).
+  - `.github/workflows/packet-tunnel-gomobile-probe.yml` —
+    unchanged from `4d179b4` (sections A–D and the
+    classifier remain useful for the next attempt; they
+    correctly distinguished STRIPPED-AFTER-LINK from
+    STRIPPED-BEFORE-LINK this run).
+  - `Sources/PacketTunnelProvider/PacketTunnelProvider.swift` and
+    `Sources/PacketTunnelProvider/GomobileExtensionProbe.swift`
+    — unchanged. `startTunnel` still fails fast with
+    `notWiredYet`.
+- Probe v6 ends here. The next probe (v7) should pick one of
+  (a) / (b) / (c) above; no code or workflow changes follow
+  this result.
+
+---
+
 ### 2026-05-29 — Probe v6: hard C relocation anchors + `optnone`
 
 - v5's diagnosis (entry directly below) was that ld_prime LTO +
