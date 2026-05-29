@@ -243,11 +243,18 @@ jobs:
           REPORT=build/reports/packet-tunnel-gomobile-probe/copied-frameworks.txt
           : > "$REPORT"
 
+          # IMPORTANT: compute COPIES OUTSIDE the `{ … } | tee` block.
+          # A `{ ... } | tee` runs the brace group in a subshell, so
+          # any assignment inside it does not propagate to the outer
+          # scope. The v11 first-attempt put `COPIES=$(find …)` inside
+          # the tee block, and the next `while … done <<<"$COPIES"`
+          # blew up under `set -u` with `COPIES: unbound variable`.
+          COPIES="$(find build/DerivedData -path '*OlcRTCMobile.framework' -type d -print 2>/dev/null | sort)"
+
           {
             echo "=== Copied OlcRTCMobile.framework copies under build/DerivedData ==="
             echo
 
-            COPIES="$(find build/DerivedData -path '*OlcRTCMobile.framework' -type d -print 2>/dev/null | sort)"
             if [ -z "$COPIES" ]; then
               echo "ERROR: no OlcRTCMobile.framework copies found under build/DerivedData" >&2
               exit 1
