@@ -9,6 +9,180 @@ Date format: `YYYY-MM-DD`. Each entry should answer **what** changed and
 
 ---
 
+### 2026-05-29 — Milestone 3.5 stage 3: App Group + shared configuration / log surface (unsigned-safe), host-app save hook, `packet-tunnel-runtime-skeleton`
+
+- Follows the Milestone 3.5 start entry directly below. Same branch
+  (`packet-tunnel-runtime-skeleton`); the start entry was committed
+  as `aa9effe` and pushed to `origin/packet-tunnel-runtime-skeleton`
+  before this stage began. This entry covers the
+  shared-configuration + log-mirror surface called out in the
+  Milestone 3.5 ROADMAP task list — explicitly the
+  "shared config surface" task and the "mirror sanitized extension
+  logs into App Group" task. Stage scope is **plumbing only**: the
+  Swift types exist and use App Group APIs, but the entitlement is
+  not attached anywhere in `project.yml` (it stays in the
+  `.entitlements` files as a future-signing reference per
+  ADR-0008). Under unsigned CI the App Group container is
+  unavailable; every shared call degrades to a sanitized no-op so
+  the host-app and tests targets still compile and run cleanly.
+- App Group identifier chosen: `group.org.openlibrecommunity.olcrtc.client`.
+  This matches the `org.openlibrecommunity.olcrtc` bundle prefix
+  used by both targets and the value already declared in
+  `Sources/App/OlcRTCClient.entitlements` and
+  `Sources/PacketTunnelProvider/PacketTunnelProvider.entitlements`.
+  Picked this over the operator-suggested `group.com.artpm.olcrtc`
+  for consistency with the existing entitlement files and bundle
+  ids — no source change to the `.entitlements` files was needed.
+- `ios/OlcRTCClient/Sources/Shared/Services/AppGroup.swift` (new).
+  Single source of truth for the App Group identifier and the
+  shared-container lookup. Exposes:
+    - `AppGroup.identifier: String` — the literal group id, used by
+      every shared store.
+    - `AppGroup.containerURL() -> URL?` — wraps
+      `FileManager.default.containerURL(forSecurityApplicationGroupIdentifier:)`.
+      Returns `nil` in the unsigned CI path (no entitlement granted);
+      this is the unsigned-safe degradation signal the stores read.
+    - `AppGroup.warnContainerUnavailableOnce()` — one-shot `os_log`
+      warning so unsigned-path executions do not spam the unified
+      log.
+  The file is `public` so the host app, the extension, and the
+  tests target (all three of which include `Sources/Shared` in
+  their source lists) link the same module symbols.
+- `ios/OlcRTCClient/Sources/Shared/Models/PacketTunnelConfig.swift`
+  (moved from
+  `ios/OlcRTCClient/Sources/PacketTunnelProvider/PacketTunnelConfig.swift`).
+  Pure path change via `git mv`; no source edits. The struct was
+  always defined `public` and explicitly framed as the shared
+  schema between the host app and the extension (see its docblock),
+  but lived under the extension's source path, which made it
+  unreachable from the host app. Moving it under
+  `Sources/Shared/Models` puts it where the project layout already
+  said it belonged. The extension keeps access because its target
+  source list includes both `Sources/PacketTunnelProvider` AND
+  `Sources/Shared`. The host app and tests targets gain access via
+  their `Sources/Shared` entries.
+- `ios/OlcRTCClient/Sources/Shared/Services/SharedConfigStore.swift`
+  (new). Reads and writes `PacketTunnelConfig` as JSON in the App
+  Group container at `<container>/packet-tunnel-config.json`. Public
+  API:
+    - `save(_:) throws` — JSON-encodes with `.sortedKeys` for
+      deterministic diffs, writes atomically; throws
+      `Error.containerUnavailable` in the unsigned-CI path,
+      `Error.encodeFailed`/`Error.writeFailed` otherwise. Callers
+      treat `containerUnavailable` as non-fatal (log and continue).
+    - `load() -> PacketTunnelConfig?` — returns `nil` on any
+      failure (container unavailable, file missing, decode error)
+      and logs through `os_log` so the failure is observable in
+      the unified log. Never throws.
+    - `clear() -> Bool` — best-effort removal; no-ops cleanly when
+      the file is absent or the container is unavailable.
+  No `keyHex` ever printed; the only os_log line that mentions
+  the file references its name only.
+- `ios/OlcRTCClient/Sources/Shared/Services/SharedLogStore.swift`
+  (new). Append-only sanitized log file at
+  `<container>/extension.log`, written by the extension and
+  readable by the host app. Public API:
+    - `append(_:)` — writes one sanitized line plus a trailing
+      newline via `FileHandle(forUpdating:)` seek-to-end; opens or
+      creates the file as needed. The store assumes the input is
+      ALREADY sanitized (ADR-0010); it does not call
+      `LogSanitizer` itself. Truncates from the head when the
+      file exceeds `byteCap` (default 64 KiB) by reading the file,
+      slicing to the last `byteCap / 2` bytes aligned to the next
+      newline, and atomic-writing back. Bounded steady-state disk.
+    - `readAll() -> [String]` — UTF-8 lines, oldest first; empty
+      array when the container is unavailable or the file is
+      absent. Used by the host app's Logs tab integration that
+      lands as a one-line follow-up (not in this entry).
+    - `clear() -> Bool` — best-effort removal.
+- `ios/OlcRTCClient/Sources/PacketTunnelProvider/PacketTunnelProvider.swift`
+  (edited):
+    - Adds `private let sharedConfig = SharedConfigStore()` and
+      `private let sharedLog = SharedLogStore()` ivars.
+    - `startTunnel` now resolves `PacketTunnelConfig` in two
+      stages: primary via
+      `decodeProviderConfiguration()` (same code path as the
+      stage-2 commit), fallback via `sharedConfig.load()`. The
+      sanitized log line records which source resolved so a
+      future debugger can tell the two paths apart. Only when
+      both sources are empty does the extension return
+      `StubError.malformedProviderConfiguration`.
+    - `logSanitized(_:type:)` now mirrors every sanitized line
+      through `sharedLog.append("[ext] \(safe)")` in addition to
+      the existing `os_log`. The `[ext]` prefix marks lines as
+      extension-originated when the host app's Logs tab eventually
+      merges them with its own log buffer.
+    - No new `MobileStart*` / `MobileCheck` / `MobilePing` calls;
+      no `NEPacketTunnelNetworkSettings`; no `NEPacketTunnelFlow`.
+      Stage 3 keeps the same hard scope as stage 2.
+- `ios/OlcRTCClient/Sources/App/Services/VPNManager.swift`
+  (rewritten):
+    - `start(profile:)` now builds a `PacketTunnelConfig(profile:)`
+      and calls `sharedConfig.save(_:)` before throwing
+      `notWiredYet`. The save is wrapped in a `do { … } catch
+      SharedConfigStore.Error.containerUnavailable { … } catch
+      { … }` so the unsigned-CI path is a benign info log, not a
+      caller-visible failure. Encode / write failures are
+      `os_log`'d at `.error` but still followed by the existing
+      `notWiredYet` throw — the operator-visible outcome is
+      unchanged for users.
+    - `stop()` is annotated to record that the shared config is
+      intentionally NOT cleared on stop. A future "forget profile"
+      UI affordance would call `SharedConfigStore.clear()`.
+- `ios/OlcRTCClient/project.yml` (edited):
+    - Adds a top-level App Group documentation comment block that
+      records the identifier, the two `.entitlements` files that
+      declare it, the three Swift files in `Sources/Shared/`
+      that implement it, and the explicit reason
+      `CODE_SIGN_ENTITLEMENTS` is NOT attached on either target in
+      this configuration (unsigned CI path per ADR-0008; the
+      shared stores degrade to no-ops). Includes the exact
+      attach lines for the future signed path.
+    - No build setting changes to either target. No new
+      `CODE_SIGN_ENTITLEMENTS`. No new framework dependencies.
+      The Milestone 3.5 stage-2 `OTHER_LDFLAGS[sdk=…]*` /
+      `-force_load` settings are preserved.
+- `Sources/App/OlcRTCClient.entitlements` and
+  `Sources/PacketTunnelProvider/PacketTunnelProvider.entitlements`:
+  unchanged. Both already declare the App Group
+  (`group.org.openlibrecommunity.olcrtc.client`) and the
+  NetworkExtension entitlement; they remain detached via the
+  comments and `project.yml` rule.
+- LogsView / AppState integration not in this entry. The
+  `SharedLogStore.readAll()` API exists; consuming it in
+  `LogsView.onAppear` (or an `AppState.mirrorExtensionLogs()`
+  method) is a small one-line follow-up that can land with
+  Milestone 4's VPN runtime work or earlier. Keeping it out of
+  Stage 3 holds the "minimal changes" line and prevents the
+  unsigned CI path from showing a stale-empty extension log
+  section as a feature.
+- Tests touched: none. Existing test files (`LogSanitizerTests`,
+  `OlcRTCURIParserTests`, `ProfileValidatorTests`,
+  `SubscriptionImporterTests`) reference none of the new
+  shared types or the moved `PacketTunnelConfig`. A
+  `SharedConfigStoreTests` / `SharedLogStoreTests` pair would be
+  worth adding when the host app's LogsView mirror lands, since
+  the same code paths need both sides exercised.
+- Hard scope reminder. Stage 3 adds the shared-data plumbing and
+  the host-app save hook. The extension still calls
+  `MobileSetDebug(false)` + `MobileIsRunning()` via
+  `GomobileExtensionProbe.touchNonStartingAPI()` and returns
+  `StubError.notWiredYet`. No tunnel. No network. No
+  entitlements attached. The unsigned CI build path produces no
+  installable VPN — see ADR-0008.
+- Files in this entry:
+    - `ios/OlcRTCClient/project.yml` (edited)
+    - `ios/OlcRTCClient/Sources/Shared/Services/AppGroup.swift` (new)
+    - `ios/OlcRTCClient/Sources/Shared/Services/SharedConfigStore.swift` (new)
+    - `ios/OlcRTCClient/Sources/Shared/Services/SharedLogStore.swift` (new)
+    - `ios/OlcRTCClient/Sources/Shared/Models/PacketTunnelConfig.swift` (moved from
+      `Sources/PacketTunnelProvider/PacketTunnelConfig.swift`; no content change)
+    - `ios/OlcRTCClient/Sources/PacketTunnelProvider/PacketTunnelProvider.swift` (edited)
+    - `ios/OlcRTCClient/Sources/App/Services/VPNManager.swift` (rewritten)
+    - `docs/ai/TASK_LOG.md` (this entry)
+
+---
+
 ### 2026-05-29 — Milestone 3.5 start: `packet-tunnel-runtime-skeleton` — reintroduce static-link settings (sdk-aware), wire `startTunnel` / `stopTunnel` skeleton
 
 - Branch: `packet-tunnel-runtime-skeleton`, started off the head of

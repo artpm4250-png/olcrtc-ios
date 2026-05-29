@@ -22,6 +22,26 @@ settings:
     CODE_SIGNING_ALLOWED: NO
     DEVELOPMENT_TEAM: ""
     PROVISIONING_PROFILE_SPECIFIER: ""
+# App Group shared between OlcRTCClient and PacketTunnelProvider:
+#   group.org.openlibrecommunity.olcrtc.client
+# Declared in both `.entitlements` files (OlcRTCClient.entitlements
+# and PacketTunnelProvider.entitlements). The constant lives in
+# `Sources/Shared/Services/AppGroup.swift`; the read/write surface is
+# `Sources/Shared/Services/SharedConfigStore.swift` (config) and
+# `Sources/Shared/Services/SharedLogStore.swift` (log mirror).
+#
+# CODE_SIGN_ENTITLEMENTS is intentionally NOT attached to either
+# target in this configuration. The unsigned CI build path
+# (CODE_SIGNING_ALLOWED=NO above) cannot grant the App Group
+# entitlement at runtime, so `AppGroup.containerURL()` returns nil
+# in CI / unsigned builds and the shared stores degrade to no-ops
+# (Stage 3 / Milestone 3.5 unsigned-safe contract).
+#
+# When a signing identity becomes available (Milestone 2 / 4),
+# attach both files via:
+#   - OlcRTCClient target:        CODE_SIGN_ENTITLEMENTS: Sources/App/OlcRTCClient.entitlements
+#   - PacketTunnelProvider target: CODE_SIGN_ENTITLEMENTS: Sources/PacketTunnelProvider/PacketTunnelProvider.entitlements
+# and flip the global CODE_SIGNING_ALLOWED back to YES.
 targets:
   OlcRTCClient:
     type: application

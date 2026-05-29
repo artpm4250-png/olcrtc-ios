@@ -67,6 +67,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         category: "tunnel"
     )
     private let sanitizer = LogSanitizer()
+    private let sharedConfig = SharedConfigStore()
+    private let sharedLog = SharedLogStore()
 
     override func startTunnel(
         options: [String: NSObject]?,
@@ -74,11 +76,23 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     ) {
         logSanitized("startTunnel: skeleton invoked (Milestone 3.5)", type: .info)
 
-        // 1. Read the config the host app placed into
-        // NETunnelProviderProtocol.providerConfiguration via
-        // NETunnelProviderManager.saveToPreferences.
-        guard let config = decodeProviderConfiguration() else {
-            // decodeProviderConfiguration logs the specific failure.
+        // 1. Resolve PacketTunnelConfig. Primary source is
+        // NETunnelProviderProtocol.providerConfiguration (stamped by
+        // the host app's NETunnelProviderManager.saveToPreferences
+        // call). Fallback is the App Group SharedConfigStore — useful
+        // when the extension is invoked out-of-band (on-demand rule,
+        // re-launch, debugging) and the protocol configuration is
+        // not populated. Either source is acceptable; both produce
+        // the same shared schema.
+        let config: PacketTunnelConfig
+        if let viaProtocol = decodeProviderConfiguration() {
+            logSanitized("startTunnel: config resolved via providerConfiguration", type: .info)
+            config = viaProtocol
+        } else if let viaShared = sharedConfig.load() {
+            logSanitized("startTunnel: config resolved via SharedConfigStore (App Group fallback)", type: .info)
+            config = viaShared
+        } else {
+            logSanitized("startTunnel: no PacketTunnelConfig available (providerConfiguration empty AND SharedConfigStore empty/unavailable)", type: .error)
             completionHandler(StubError.malformedProviderConfiguration)
             return
         }
@@ -154,11 +168,16 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     /// Funnel for every extension log line. Runs the line through
-    /// `LogSanitizer` (ADR-0010) before handing it to `os_log`.
+    /// `LogSanitizer` (ADR-0010) before handing it to `os_log` AND
+    /// mirroring it into the App Group `SharedLogStore` so the host
+    /// app's Logs tab can surface extension-side events end-to-end.
     /// `os_log` with `%{public}@` is required so the message survives
-    /// to the unified log; the sanitizer is what makes that safe.
+    /// to the unified log; the sanitizer is what makes both sinks
+    /// safe. `SharedLogStore.append` is a no-op when the App Group
+    /// container is unavailable (unsigned CI path).
     private func logSanitized(_ message: String, type: OSLogType) {
         let safe = sanitizer.sanitize(message)
         os_log("%{public}@", log: log, type: type, safe)
+        sharedLog.append("[ext] \(safe)")
     }
 }
