@@ -9,6 +9,209 @@ Date format: `YYYY-MM-DD`. Each entry should answer **what** changed and
 
 ---
 
+### 2026-05-29 — Probe v12: link the gomobile static archive into the extension via `-force_load`
+
+- v11 (entry below) classified the run as
+  `DIAG-SOURCE-STATIC-FRAMEWORK`. Run:
+  [`Packet Tunnel Gomobile Probe` 26633894897](https://github.com/artpm4250-png/olcrtc-ios/actions/runs/26633894897)
+  on commit
+  [`159e4c2`](https://github.com/artpm4250-png/olcrtc-ios/commit/159e4c2).
+  The diagnostic showed `ios-arm64/OlcRTCMobile.framework/OlcRTCMobile`
+  is a `current ar archive` (a `.a`-style static archive) — not a
+  Mach-O dylib. That makes Xcode's behaviour from v10/v11 internally
+  consistent: the embed phase runs
+  `builtin-copy -remove-static-executable` against the source and
+  injects a codeless stub binary into both
+  `OlcRTCClient.app/Frameworks/OlcRTCMobile.framework/OlcRTCMobile`
+  and `…/PacketTunnelProvider.appex/Frameworks/…/OlcRTCMobile`. So
+  `embed: true` cannot ship Mobile symbols regardless of any link
+  edge work the extension does. Probes v2–v10 were operating on the
+  wrong artifact.
+- The host app still works because gomobile's static archive is
+  **linked** into the app executable — its `.o` files end up in the
+  app binary itself. The codeless stub framework next to it is
+  inert: nothing dyld-loads `OlcRTCMobile.framework/OlcRTCMobile`
+  at runtime, so the stub is just bundle decoration. v12 mirrors
+  that exact shape for the extension.
+- `ios/OlcRTCClient/project.yml`, `PacketTunnelProvider` target:
+  - `dependencies` entry for `Frameworks/OlcRTCMobile.xcframework`
+    flipped to `embed: false / link: true / codeSign: false`.
+    XcodeGen still adds the framework to *Link Binary With
+    Libraries* and exposes its `Modules/` to the Swift compile
+    step, so `import OlcRTCMobile` resolves; but no Copy Files
+    (Embed Frameworks) phase is generated for the extension.
+    The `.appex` therefore has no `Frameworks/OlcRTCMobile.framework`
+    directory at all (no codeless stub, nothing to inject into).
+  - `OTHER_LDFLAGS` for the extension target now reads
+    `$(inherited) -lresolv -force_load $(SRCROOT)/Frameworks/OlcRTCMobile.xcframework/ios-arm64/OlcRTCMobile.framework/OlcRTCMobile`.
+    `$(SRCROOT)` resolves to `ios/OlcRTCClient`, so the path
+    expands to the device-slice static archive inside the
+    xcframework. `-force_load` keeps every object file from that
+    archive, defeating the dead-strip that v2–v10 fought against —
+    `Mobile*` exports survive into the final extension executable
+    even though nothing reachable from `_NSExtensionMain`
+    references them yet. We deliberately do NOT use `-all_load`;
+    the force-load is scoped to the one archive that needs it.
+  - `APPLICATION_EXTENSION_API_ONLY: YES` and `LLVM_LTO: NO` are
+    unchanged. `codeSign: false` and entitlement detachment are
+    unchanged. The host app's dependency
+    (`embed: true / codeSign: false`) is unchanged — v12 does not
+    touch the host-app shape, only the extension's.
+- `ios/OlcRTCClient/Sources/PacketTunnelProvider/PacketTunnelProvider.swift`
+  unchanged: `startTunnel` still calls
+  `GomobileExtensionProbe.touchNonStartingAPI()` and then returns
+  `StubError.notWiredYet`. The v9 minimal-real-entrypoint probe
+  (`MobileSetDebug(false)` + `MobileIsRunning()`) is the only
+  Mobile* call from the extension's principal class. No
+  `MobileStart*`, no `MobileCheck`, no `MobilePing`, no sockets,
+  no `NEPacketTunnelNetworkSettings`, no `NEPacketTunnelFlow`.
+- `.github/workflows/packet-tunnel-gomobile-probe.yml` rewritten
+  for v12. Steps, in order:
+  1. `Confirm source xcframework is a static archive (v11 baseline)`
+     runs `file` against
+     `ios-arm64/OlcRTCMobile.framework/OlcRTCMobile` and asserts
+     `current ar archive`. If `gomobile bind` ever switches its
+     iOS output back to a dylib, the static-link strategy stops
+     being correct — better to fail loudly here than to lie about
+     the classification later. Output tees to `source-archive.txt`.
+  2. `xcodegen generate` + `xcodebuild -list` + `Build
+     PacketTunnelProvider via host scheme …` — same shape as
+     v10/v11, build is `xcodebuild build` (not `archive`),
+     `-derivedDataPath build/DerivedData`, signing disabled,
+     Release iphoneos generic. The build step now carries
+     `id: build` so the classifier can read its outcome.
+  3. `Inspect final PacketTunnelProvider executable (v12 link
+     probe)` runs with `if: always()` so a build break still
+     produces an artifact. Captures, for the `.appex`:
+     - `find …/.appex -maxdepth 4` for the bundle layout, plus
+       a separate listing of `…/.appex/Frameworks/` (which v12
+       expects to be absent or at least not contain
+       `OlcRTCMobile.framework`);
+     - `file`, `du -h`, `otool -hv`, `otool -L` for the
+       extension binary;
+     - `nm -gU` filtered to
+       `Mobile(Start|StartWithTransport|IsRunning|SetDebug|Check|Ping)`
+       (defined exports — these are what we expect to find);
+     - `nm -u` filtered to the same regex (undefined references —
+       expected to be empty if the link is clean);
+     - a broader `nm | grep ' _\?Mobile'` survey for the first 50
+       lines, so unexpected Mobile-prefixed symbols also surface.
+     Output tees to `appex-binary.txt`.
+  4. `Inspect link-phase log lines (v12)` greps `xcodebuild.log`
+     for `Ld …PacketTunnelProvider` (with 5 lines of context),
+     `-force_load` references, `OlcRTCMobile` references in the
+     link command, linker errors / warnings (`Undefined symbol`,
+     `duplicate symbol`, `ld: error`, `ld: warning`), and the
+     `Injecting stub binary into codeless framework (in target
+     'PacketTunnelProvider')` line which v12 expects to be absent.
+     Output tees to `link-phase-log.txt`.
+  5. `Classify and summarize v12 link probe` reads
+     `${{ steps.build.outcome }}` plus the structural checks and
+     assigns one of:
+     - `PASS-STATIC-LINKED` — build succeeded, extension binary
+       has `Mobile*` defined exports, no
+       `OlcRTCMobile.framework` directory inside the `.appex`,
+       no `.xcframework` leak into the `.app`,
+       `APPLICATION_EXTENSION_API_ONLY: YES` still in
+       `project.yml`.
+     - `FAIL-NOT-LINKED` — build succeeded but the extension
+       binary contains no `Mobile*` exports. Means the
+       `-force_load` flag did not pull the gomobile archive's
+       objects (path mis-resolved, archive missing, or a Xcode
+       config quirk). The `link-phase-log.txt` and
+       `appex-binary.txt` together pinpoint which.
+     - `FAIL-STRUCTURAL` — `Mobile*` exports are present but a
+       structural assertion failed: an embedded
+       `OlcRTCMobile.framework` reappeared inside the `.appex`,
+       or a stray `.xcframework` ended up in the `.app`, or the
+       API-only flag flipped to `NO`. Surfaces as a distinct
+       class so v12 doesn't mis-call it a pass.
+     - `FAIL-BUILD` — `xcodebuild` did not produce a `.appex`
+       executable.
+     The same step writes
+     `build/reports/packet-tunnel-gomobile-probe/summary.md`
+     with three tables (build, symbols, structure) and mirrors
+     the summary to `$GITHUB_STEP_SUMMARY`. Hard exit codes
+     match the classification (only `PASS-STATIC-LINKED`
+     returns 0).
+  6. `Upload v12 link-probe report` is `actions/upload-artifact@v4`
+     uploading `build/reports/packet-tunnel-gomobile-probe/`
+     **and** the raw `build/xcodebuild.log`, as artifact
+     `packet-tunnel-gomobile-probe-v12-report` with 14-day
+     retention.
+- Hard scope reminder. v12 is a link probe — its only goal is to
+  prove that the extension executable can host gomobile's static
+  archive correctly under unsigned CI with
+  `APPLICATION_EXTENSION_API_ONLY: YES`. The probe call in
+  `startTunnel` is still only `MobileSetDebug(false)` and
+  `MobileIsRunning()`. No `MobileStart*`, no `MobileCheck`, no
+  `MobilePing`, no sockets, no `NEPacketTunnelNetworkSettings`,
+  no `NEPacketTunnelFlow`. No Go-core changes, no signing, no
+  entitlements, no claim that VPN works. Real `startTunnel`
+  wiring stays gated on Milestone 4. See
+  [`docs/ai/DECISIONS.md`](DECISIONS.md) ADR-0008.
+
+---
+
+### 2026-05-29 — Probe v11 result: classification = `DIAG-SOURCE-STATIC-FRAMEWORK` (gomobile emits a static framework wrapper; Xcode's embed phase strips it)
+
+- Run:
+  [`Packet Tunnel Gomobile Probe` 26633894897](https://github.com/artpm4250-png/olcrtc-ios/actions/runs/26633894897)
+  on commit
+  [`159e4c2`](https://github.com/artpm4250-png/olcrtc-ios/commit/159e4c2),
+  branch `packet-tunnel-gomobile-probe`. Workflow conclusion:
+  success. Diagnostic-only, no code change applied as a result
+  of v11 itself — the action lands in v12.
+- Source xcframework slice
+  (`ios/OlcRTCClient/Frameworks/OlcRTCMobile.xcframework/ios-arm64/OlcRTCMobile.framework/OlcRTCMobile`):
+  `file` reports `Mach-O universal binary with 1 architecture:
+  [arm64:current ar archive]`. Same for the simulator slice
+  (`ios-arm64_x86_64-simulator/...`). i.e. the gomobile-produced
+  `.framework` is a static archive masquerading as a Mach-O
+  framework binary, **not** a dylib. `nm -gU` on that archive
+  found `MobileStart`, `MobileStartWithTransport`,
+  `MobileIsRunning`, `MobileSetDebug`, `MobileCheck`, and
+  `MobilePing` as expected — the symbols are there, the wrapper
+  is just static.
+- App-bundle copy
+  (`OlcRTCClient.app/Frameworks/OlcRTCMobile.framework/OlcRTCMobile`):
+  `file` reports a dynamic Mach-O image, `du -h` is ~40 KB,
+  `nm -gU | grep Mobile…` returns nothing. Same story for the
+  appex copy
+  (`…/PacketTunnelProvider.appex/Frameworks/OlcRTCMobile.framework/OlcRTCMobile`).
+  i.e. the embedded copies are codeless stubs with no Mobile
+  symbols.
+- xcodebuild log:
+  `Injecting stub binary into codeless framework` count = 2,
+  one for `OlcRTCClient` and one for `PacketTunnelProvider`. The
+  full embed-phase context shows
+  `builtin-copy -exclude … -remove-static-executable
+  /…/ios/OlcRTCClient/Frameworks/OlcRTCMobile.xcframework/ios-arm64/OlcRTCMobile.framework
+  /…/Build/Products/Release-iphoneos/{OlcRTCClient.app/Frameworks,PacketTunnelProvider.appex/Frameworks}`,
+  followed immediately by the stub-injection note. The flag
+  `-remove-static-executable` is exactly the embed-phase code
+  path Xcode runs against static-archive frameworks.
+- Conclusion (recorded in `summary.md` of the v11 artifact):
+  gomobile produces a **static** framework wrapper. Xcode's
+  embed phase, when asked to copy a static framework into the
+  product, is documented to remove the static executable and
+  inject a codeless stub binary in its place. Therefore
+  `embed: true` is the wrong strategy for the gomobile output —
+  every probe v2–v10 was working on a copy that would never
+  carry Mobile symbols. The correct shape is to **link** the
+  static archive into the consuming executable, which is what
+  the host app already does for itself (its main binary contains
+  the Go runtime). The extension needs the same. v12 acts on
+  this.
+- Artifact: `packet-tunnel-gomobile-probe-v11-report` —
+  `summary.md`, `source-xcframework.txt`,
+  `copied-frameworks.txt`, `embed-phase-log.txt`. 14-day
+  retention.
+- No source changes were committed for the v11 result entry
+  itself; the change record for v12 is the entry above.
+
+---
+
 ### 2026-05-29 — Probe v11: diagnose the codeless-stub embed (no source changes; pure diagnostic run)
 
 - v10 (entry below) confirmed the structural embed path works:

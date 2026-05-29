@@ -150,11 +150,26 @@ extension memory budget.
       one of them ended with ld_prime's `-dead_strip` removing
       `LC_LOAD_DYLIB` for `OlcRTCMobile` from the final extension
       binary regardless of which anchor strategy held the symbol
-      reference. Probe v10 flips to `embed: true, codeSign: false,
-      link: true` so XcodeGen emits a Copy Files (Embed
-      Frameworks) phase that copies the iphoneos `.framework`
-      slice into `PacketTunnelProvider.appex/Frameworks/`. See
-      `docs/ai/TASK_LOG.md` for the v2–v10 probe chain. Branch
+      reference. Probe v10 flipped to `embed: true, codeSign:
+      false, link: true` so XcodeGen emitted a Copy Files (Embed
+      Frameworks) phase, but xcodebuild's embed phase ran
+      `builtin-copy -remove-static-executable` against the source
+      and injected a 40 KB codeless stub into both
+      `OlcRTCClient.app/Frameworks/` and
+      `PacketTunnelProvider.appex/Frameworks/` — no Mobile
+      symbols shipped in either copy. Probe v11 (run
+      [26633894897](https://github.com/artpm4250-png/olcrtc-ios/actions/runs/26633894897))
+      diagnosed why: gomobile's `.framework/<name>` binary is a
+      `current ar archive` — a static archive wrapped in a
+      framework directory, **not** a Mach-O dylib — and Xcode's
+      embed phase strips static-archive frameworks by design.
+      Probe v12 acts on that finding: revert the extension to
+      `embed: false, link: true, codeSign: false` and link the
+      static archive into the extension binary directly via
+      `OTHER_LDFLAGS: $(inherited) -lresolv -force_load
+      $(SRCROOT)/Frameworks/OlcRTCMobile.xcframework/ios-arm64/OlcRTCMobile.framework/OlcRTCMobile`.
+      This mirrors how the host app already gets the Go runtime.
+      See `docs/ai/TASK_LOG.md` for the v2–v12 probe chain. Branch
       `packet-tunnel-gomobile-probe`.
 - [x] Mirror `OTHER_LDFLAGS: $(inherited) -lresolv` from the host
       app onto the extension target (the Go runtime needs BSD
@@ -186,15 +201,23 @@ extension memory budget.
       - logs to a shared App Group log file (so the main app's
         Logs tab can mirror it).
 - [ ] Smoke test the binary size of the signed `.ipa`. Probe v10
-      moved the extension to `embed: true` (see
-      `docs/ai/TASK_LOG.md` and Milestone 3 task 1 above), which
-      duplicates `OlcRTCMobile.framework` (~33 MB) into both
-      `OlcRTCClient.app/Frameworks/` and
-      `OlcRTCClient.app/PlugIns/PacketTunnelProvider.appex/Frameworks/`.
-      That duplication is acceptable for the probe but may need
-      optimization (shared single copy via Copy Files override, or
-      a follow-up that drops the host-app embed once the extension
-      owns the runtime).
+      moved the extension to `embed: true`, which would have
+      duplicated `OlcRTCMobile.framework` (~33 MB) into both the
+      app and the appex; v11 found the embed phase stripped both
+      copies to 40 KB stubs. Probe v12 reverts the extension to
+      `embed: false` and links the static archive into the
+      extension executable instead — the Go runtime's object
+      files end up inside `PacketTunnelProvider`'s own binary
+      (mirroring how the host app's main binary already carries
+      the same archive). The host app keeps its own
+      `embed: true / codeless-stub` framework for now (v12
+      doesn't change the host app), so the `.ipa` will still
+      contain the host app's stub `Frameworks/OlcRTCMobile.framework`
+      directory plus two executables that each carry a copy of
+      the Go runtime. A future optimization could share the
+      runtime via a true dynamic framework once gomobile gains
+      that mode, or split the Go core into a smaller leaf the
+      extension can link without doubling app size.
 - [ ] Stress test the extension memory budget (~15 MB on older
       devices, ~50 MB on newer). Capture peak RSS in `Logs`.
 
@@ -210,8 +233,9 @@ extension memory budget.
 
 **Acceptance criteria:**
 - The extension target links cleanly with
-  `APPLICATION_EXTENSION_API_ONLY = YES` and the framework
-  embedded.
+  `APPLICATION_EXTENSION_API_ONLY = YES` and the gomobile static
+  archive force-loaded into the extension executable (probe v12
+  classification `PASS-STATIC-LINKED`).
 - `startTunnel` runs to completion against a real olcRTC endpoint
   and `NEPacketTunnelFlow.readPackets` starts producing data.
 - The extension process stays under the iOS memory budget for a
