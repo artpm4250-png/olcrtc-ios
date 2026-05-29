@@ -9,6 +9,129 @@ Date format: `YYYY-MM-DD`. Each entry should answer **what** changed and
 
 ---
 
+### 2026-05-29 — Probe v11: diagnose the codeless-stub embed (no source changes; pure diagnostic run)
+
+- v10 (entry below) confirmed the structural embed path works:
+  XcodeGen's `embed: true` on the extension produces a real
+  `Frameworks/OlcRTCMobile.framework` inside the `.appex`. But
+  xcodebuild's own log carried the line `Injecting stub binary
+  into codeless framework (in target 'PacketTunnelProvider' …)`
+  — same line also appeared for the host app — and `du -sh`
+  showed both embedded copies as 40 KB. Xcode treated the
+  copied iphoneos slice as **codeless**, compiled a dylib stub
+  from `/dev/null`, and `lipo`-replaced the framework binary
+  with that stub. Net effect: the real Go runtime is not
+  shipped in either bundle. The host app's `iOS App + Gomobile
+  Build` pipeline has been doing this silently since the
+  earliest unsigned IPA builds; v10 is the first probe to
+  surface it.
+- v11 is a pure diagnostic. No `project.yml` or source change.
+  The only changes:
+  - `.github/workflows/packet-tunnel-gomobile-probe.yml`
+    rewritten end-to-end for the diagnostic question. New
+    structure:
+    1. `Diagnose source xcframework slices (pre-build)` runs
+       *before* the xcodebuild build, so the source
+       `OlcRTCMobile.xcframework` is captured exactly as
+       `scripts/build-gomobile-ios.sh` produced it. For each
+       framework slice under the xcframework (typically
+       `ios-arm64/` and `ios-arm64-simulator/`) the step
+       prints `find`, `file`, `du -h`, `otool -hv`, `otool -L`,
+       `nm -gU | grep Mobile(Start|StartWithTransport|IsRunning|SetDebug|Check|Ping)`,
+       and `plutil -p Info.plist`. Output is teed to
+       `build/reports/packet-tunnel-gomobile-probe/source-xcframework.txt`.
+    2. `Build PacketTunnelProvider via host scheme …` is
+       unchanged from v10 — still `xcodebuild build` with
+       signing disabled, Release iphoneos generic.
+    3. `Diagnose copied OlcRTCMobile.framework copies
+       (post-build)` walks every `OlcRTCMobile.framework`
+       directory anywhere under `build/DerivedData` and prints
+       the same `find` / `file` / `du -h` / `otool -hv` /
+       `otool -L` / `nm -gU` / `plutil` for each. Output tees
+       to `copied-frameworks.txt`. The interesting copies are
+       `OlcRTCClient.app/Frameworks/OlcRTCMobile.framework` and
+       `OlcRTCClient.app/PlugIns/PacketTunnelProvider.appex/Frameworks/OlcRTCMobile.framework`,
+       but the intermediate ones under `Intermediates.noindex`
+       are useful too — they show how Xcode staged the framework
+       before the embed phase ran.
+    4. `Extract embed-phase log lines` greps
+       `build/xcodebuild.log` for the embed-phase markers
+       (`Injecting stub binary`, `codeless framework`,
+       `builtin-copy`, `OlcRTCMobile.framework`,
+       `remove-static-executable`) with 5 lines of surrounding
+       context. Also counts the stub-injection lines and lists
+       the targets that issued them. Output tees to
+       `embed-phase-log.txt`.
+    5. `Classify and summarize v11 diagnostics` cross-references
+       the source slice against the app and extension embedded
+       copies, runs `file -b` and `nm -gU | grep Mobile…` on
+       each, and assigns a classification class:
+       - `DIAG-SOURCE-MISSING` — source slice not on disk; the
+         diagnostic cannot proceed, fail loudly.
+       - `DIAG-NO-MOBILE-SYMBOLS-IN-SOURCE` — source slice has
+         no `MobileStart` / `MobileStartWithTransport` /
+         `MobileIsRunning` / `MobileSetDebug` / `MobileCheck` /
+         `MobilePing` exports. Means `gomobile bind` itself
+         dropped them.
+       - `DIAG-SOURCE-STATIC-FRAMEWORK` — source binary is an
+         ar archive or a Mach-O object, not a dynamic library.
+         Would explain Xcode's `-remove-static-executable`
+         decision: the codeless classification is justified
+         because the framework is static.
+       - `DIAG-SOURCE-DYNAMIC-COPIED-STUB` — source has Mobile
+         symbols, but the `.appex` copy has none. The embed
+         phase actively replaced the real binary with a stub
+         (the v10 finding, now measured against source).
+       - `DIAG-SOURCE-DYNAMIC-COPIED-INTACT` — symbols survive
+         into the copy. Would mean v10's stub-injection log
+         line was either misleading or has been fixed somehow.
+       - `DIAG-UNKNOWN` — none of the above (catch-all).
+       The same step writes
+       `build/reports/packet-tunnel-gomobile-probe/summary.md`
+       with the table of (present / type / has Mobile symbols)
+       for source, app, and appex copies, plus the stub-injection
+       count and the list of targets that triggered it. The
+       summary.md is also mirrored to `$GITHUB_STEP_SUMMARY` so
+       the run page shows it without artifact download.
+    6. The classifier intentionally **does not** fail the run
+       on any `DIAG-*` class except `DIAG-SOURCE-MISSING`.
+       v11's job is to capture the answer, not to gate the
+       branch — once we know which class fires, v12 can act
+       on it. The
+       `APPLICATION_EXTENSION_API_ONLY=YES present in
+       project.yml` gate from v9/v10 is kept; a regression in
+       that setting still fails the run.
+    7. `Upload v11 diagnostic report` is a new
+       `actions/upload-artifact@v4` step that uploads
+       `build/reports/packet-tunnel-gomobile-probe/` as artifact
+       `packet-tunnel-gomobile-probe-v11-report` with 14-day
+       retention.
+  - `docs/ai/TASK_LOG.md` — this entry.
+  - `docs/ai/GOMOBILE_BINDINGS.md` — short note pointing at
+    the v11 diagnostic.
+- Source files unchanged in v11:
+  - `ios/OlcRTCClient/project.yml` — still
+    `APPLICATION_EXTENSION_API_ONLY: YES`, `LLVM_LTO: NO`,
+    framework dependency `embed: true / codeSign: false /
+    link: true`, `OTHER_LDFLAGS: $(inherited) -lresolv`.
+    Signing disabled, entitlements detached.
+  - `ios/OlcRTCClient/Sources/PacketTunnelProvider/PacketTunnelProvider.swift`
+    — `startTunnel` still calls
+    `GomobileExtensionProbe.touchNonStartingAPI()` and then
+    returns `StubError.notWiredYet`.
+  - `ios/OlcRTCClient/Sources/PacketTunnelProvider/GomobileExtensionProbe.swift`
+    — unchanged.
+- Hard scope reminder. v11 does no VPN runtime work. The probe
+  call in `startTunnel` is still only
+  `MobileSetDebug(false)` and `MobileIsRunning()`. No
+  `MobileStart*`, no `MobileCheck`, no `MobilePing`, no
+  sockets, no `NEPacketTunnelNetworkSettings`,
+  no `NEPacketTunnelFlow`. The unsigned CI build still does
+  not produce an installable VPN — see
+  [`docs/ai/DECISIONS.md`](DECISIONS.md) ADR-0008.
+
+---
+
 ### 2026-05-29 — Probe v10 result: classification = `PASS-EMBEDDED` (extension structurally embeds the framework; Xcode injects a 40 KB codeless stub for the binary)
 
 - Run:

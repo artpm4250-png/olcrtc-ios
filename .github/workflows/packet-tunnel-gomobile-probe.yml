@@ -14,11 +14,30 @@ name: Packet Tunnel Gomobile Probe
 #   single-purpose so failures point at one thing).
 # - Code signing stays disabled; entitlements stay detached.
 #
-# Acceptance criterion: this workflow runs green. That means the
-# extension target compiled and linked against OlcRTCMobile under
-# APPLICATION_EXTENSION_API_ONLY = YES, without iOS rejecting any
-# symbol or build setting. A red run captures the exact symbol /
-# directive / linker error in the log, which drives the next step.
+# Probe history (full chain in `docs/ai/TASK_LOG.md`):
+#   v2–v9  : tried to force ld_prime to keep `LC_LOAD_DYLIB` for
+#            OlcRTCMobile in the extension binary via Swift stored
+#            properties, C anchors, `-Wl,-u`, `-Wl,-needed_framework`,
+#            constructor functions, and finally a real `startTunnel`
+#            entrypoint reference. All stripped by `-dead_strip`.
+#   v10    : flipped the extension's framework dependency to
+#            `embed: true`. Build succeeded, framework directory
+#            appeared in `.appex/Frameworks/`, but `du -sh` was 40K
+#            and the xcodebuild log showed "Injecting stub binary
+#            into codeless framework" — both for the extension AND
+#            for the host app, which had been doing the same silent
+#            thing since the earliest unsigned IPA builds. The
+#            embedded copy is a `/dev/null`-compiled dylib stub.
+#   v11 (this run): pure diagnostic. Inspect the source xcframework
+#            slice (Mach-O? has Mobile symbols? what does its
+#            `Info.plist` look like?) and every copied
+#            `OlcRTCMobile.framework` under `build/DerivedData`,
+#            cross-reference with the embed-phase log lines from
+#            xcodebuild, and write a structured report under
+#            `build/reports/packet-tunnel-gomobile-probe/` for
+#            artifact upload. v11 deliberately classifies but does
+#            NOT fail on the stub-injection finding — its job is to
+#            answer the "why" question that v10 left open.
 
 on:
   workflow_dispatch:
@@ -64,6 +83,114 @@ jobs:
       - name: Build OlcRTCMobile.xcframework
         run: scripts/build-gomobile-ios.sh
 
+      - name: Diagnose source xcframework slices (pre-build)
+        run: |
+          set -euo pipefail
+          # Probe v11 — Section A. Capture the state of
+          # `OlcRTCMobile.xcframework` exactly as `gomobile bind`
+          # produced it, before Xcode has touched it. The
+          # codeless-stub injection v10 surfaced happens inside
+          # Xcode's embed phase; whether that decision is justified
+          # depends entirely on what the source slice actually looks
+          # like. Output goes to a structured report file the next
+          # step's artifact upload will collect.
+          mkdir -p build/reports/packet-tunnel-gomobile-probe
+          REPORT=build/reports/packet-tunnel-gomobile-probe/source-xcframework.txt
+          : > "$REPORT"
+
+          XCF=ios/OlcRTCClient/Frameworks/OlcRTCMobile.xcframework
+          {
+            echo "=== Source xcframework: $XCF ==="
+            echo
+            if [ ! -d "$XCF" ]; then
+              echo "ERROR: source xcframework does not exist at $XCF" >&2
+              exit 1
+            fi
+
+            echo "--- find $XCF -maxdepth 5 -print | sort ---"
+            find "$XCF" -maxdepth 5 -print 2>/dev/null | sort
+
+            echo
+            echo "--- plutil -p $XCF/Info.plist (xcframework root manifest) ---"
+            if [ -f "$XCF/Info.plist" ]; then
+              plutil -p "$XCF/Info.plist" || true
+            else
+              echo "(missing)"
+            fi
+          } | tee -a "$REPORT"
+
+          # For each slice's framework binary inside the xcframework,
+          # dump the Mach-O header, library list, du, and a Mobile*
+          # symbol probe. The xcframework typically has ios-arm64
+          # (device) and ios-arm64-simulator (simulator) slices; the
+          # device slice is the one Xcode embeds into iphoneos
+          # bundles, so it's the one that matters most for v11.
+          while IFS= read -r slice; do
+            {
+              echo
+              echo "===================================================="
+              echo "Slice: $slice"
+              echo "===================================================="
+              echo
+              echo "--- find $slice -maxdepth 4 -print | sort ---"
+              find "$slice" -maxdepth 4 -print 2>/dev/null | sort
+
+              fw_name="$(basename "$slice")"
+              fw_basename="${fw_name%.framework}"
+              fw_binary="$slice/$fw_basename"
+
+              echo
+              echo "--- expected framework binary path: $fw_binary ---"
+              if [ -f "$fw_binary" ]; then
+                echo "exists: yes"
+              elif [ -L "$fw_binary" ]; then
+                echo "exists: symlink → $(readlink "$fw_binary")"
+              else
+                echo "exists: NO"
+              fi
+
+              if [ -e "$fw_binary" ]; then
+                echo
+                echo "--- file $fw_binary ---"
+                file "$fw_binary" || true
+
+                echo
+                echo "--- du -h $fw_binary ---"
+                du -h "$fw_binary" || true
+
+                echo
+                echo "--- otool -hv $fw_binary ---"
+                otool -hv "$fw_binary" 2>/dev/null || true
+
+                echo
+                echo "--- otool -L $fw_binary ---"
+                otool -L "$fw_binary" 2>/dev/null || true
+
+                echo
+                echo "--- nm -gU $fw_binary | grep Mobile(Start|StartWithTransport|IsRunning|SetDebug|Check|Ping) ---"
+                nm -gU "$fw_binary" 2>/dev/null \
+                  | grep -E 'Mobile(Start|StartWithTransport|IsRunning|SetDebug|Check|Ping)' \
+                  | head -50 \
+                  || echo "(no matches)"
+              fi
+
+              if [ -f "$slice/Info.plist" ]; then
+                echo
+                echo "--- plutil -p $slice/Info.plist ---"
+                plutil -p "$slice/Info.plist" || true
+              fi
+
+              if [ -d "$slice/Modules" ]; then
+                echo
+                echo "--- $slice/Modules contents ---"
+                find "$slice/Modules" -maxdepth 3 -print 2>/dev/null | sort
+              fi
+            } | tee -a "$REPORT"
+          done < <(find "$XCF" -mindepth 2 -maxdepth 2 -name '*.framework' -type d -print 2>/dev/null | sort)
+
+          echo
+          echo "Source xcframework report written to: $REPORT"
+
       - name: Generate Xcode project
         working-directory: ios/OlcRTCClient
         run: xcodegen generate
@@ -86,9 +213,9 @@ jobs:
           set -euo pipefail
           mkdir -p build
           # Tee xcodebuild's full stdout/stderr to build/xcodebuild.log so
-          # the next step can quote the relevant Ld invocation directly,
-          # while still streaming the same lines to the GitHub Actions
-          # console for live debugging.
+          # the diagnostic step can quote the relevant embed / Ld lines
+          # directly, while still streaming the same lines to the GitHub
+          # Actions console for live debugging.
           xcodebuild \
             -project ios/OlcRTCClient/OlcRTCClient.xcodeproj \
             -scheme OlcRTCClient \
@@ -101,280 +228,341 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             build 2>&1 | tee build/xcodebuild.log
 
-      - name: Confirm extension binary actually linked against OlcRTCMobile
+      - name: Diagnose copied OlcRTCMobile.framework copies (post-build)
         run: |
           set -euo pipefail
-          # The host scheme depends on PacketTunnelProvider, so a green
-          # build above means the extension's compile + link path
-          # succeeded. We need a stronger check than "the file exists":
-          # if the link edge to OlcRTCMobile is silently dropped, the
-          # extension still compiles but ships without any gomobile
-          # symbol references — and we'd be reporting a green probe
-          # that didn't actually exercise the framework.
-          #
-          # Probe history (see `docs/ai/TASK_LOG.md`):
-          # - v2 used a Swift stored property calling `MobileIsRunning`
-          #   — eliminated by Swift WMO before the linker ran.
-          # - v3 added `-Wl,-u,_MobileIsRunning` — ld dead-stripped the
-          #   framework anyway.
-          # - v4 added `-Wl,-needed_framework,OlcRTCMobile` — ld_prime
-          #   allowed the trailing `-framework OlcRTCMobile` to shadow
-          #   the `needed` flag.
-          # - v5 moved the anchor to a C function with
-          #   `__attribute__((used))` — symbol survived, body folded.
-          # - v6 used static function-pointer initializers — relocations
-          #   nullified.
-          # - v7 disabled LTO — proved LTO was not the cause.
-          # - v8 added `__attribute__((constructor))` — still stripped.
-          # - v9 called the probe from `PacketTunnelProvider.startTunnel`
-          #   — still stripped. ld treats `_NSExtensionMain` as the
-          #   only true root and the principal class as reachable
-          #   only via Objective-C runtime string dispatch, so it
-          #   nullifies instruction-level call sites it can't
-          #   statically prove are live.
-          # - v10 (this run) embeds the gomobile framework into the
-          #   extension bundle via XcodeGen `embed: true`. ld can no
-          #   longer drop `LC_LOAD_DYLIB` (or, if it does, dyld
-          #   resolves the embedded copy at runtime anyway). v10
-          #   classifies primarily on bundle structure: did the
-          #   framework actually get copied into the `.appex`?
-          APPEX="build/DerivedData/Build/Products/Release-iphoneos/PacketTunnelProvider.appex"
-          APP="build/DerivedData/Build/Products/Release-iphoneos/OlcRTCClient.app"
-          if [ ! -d "$APPEX" ]; then
-            echo "ERROR: extension bundle missing at $APPEX" >&2
-            exit 1
-          fi
-          if [ ! -f "$APPEX/PacketTunnelProvider" ]; then
-            echo "ERROR: extension binary missing at $APPEX/PacketTunnelProvider" >&2
-            exit 1
-          fi
+          # Probe v11 — Section B. After Xcode's embed phase has run,
+          # walk every `OlcRTCMobile.framework` directory anywhere
+          # under `build/DerivedData` and capture the same diagnostics
+          # we captured for the source slice. The interesting copies
+          # are the ones inside `.app/Frameworks/` and
+          # `.appex/Frameworks/`. Other intermediate copies
+          # (`Intermediates.noindex`, etc.) are also useful to see how
+          # the embed phase staged the framework.
+          mkdir -p build/reports/packet-tunnel-gomobile-probe
+          REPORT=build/reports/packet-tunnel-gomobile-probe/copied-frameworks.txt
+          : > "$REPORT"
 
-          file "$APPEX/PacketTunnelProvider"
-
-          # ---------- A. Final extension binary diagnostics ----------
-          echo
-          echo "=== A. Final extension binary diagnostics ==="
-          echo
-          echo "--- otool -L (full library list) ---"
-          otool -L "$APPEX/PacketTunnelProvider" || true
-
-          echo
-          echo "--- otool -l | grep -A2 LC_LOAD_DYLIB (load commands) ---"
-          otool -l "$APPEX/PacketTunnelProvider" 2>/dev/null \
-            | grep -A 2 -E 'LC_LOAD_DYLIB|LC_LOAD_WEAK_DYLIB' || true
-
-          echo
-          echo "--- nm -u | grep Mobile(IsRunning|SetDebug) (final binary undef refs) ---"
-          final_mobile_undefs="$(nm -u "$APPEX/PacketTunnelProvider" 2>/dev/null \
-            | grep -E 'Mobile(IsRunning|SetDebug)' || true)"
-          if [ -n "$final_mobile_undefs" ]; then
-            echo "$final_mobile_undefs"
-          else
-            echo "(none)"
-          fi
-
-          # ---------- B. Extension bundle structure ----------
-          echo
-          echo "=== B. Extension bundle structure ==="
-          echo
-          echo "--- find $APPEX -maxdepth 4 -print | sort ---"
-          find "$APPEX" -maxdepth 4 -print 2>/dev/null | sort || true
-
-          appex_framework_binary="$APPEX/Frameworks/OlcRTCMobile.framework/OlcRTCMobile"
-          appex_framework_plist="$APPEX/Frameworks/OlcRTCMobile.framework/Info.plist"
-          appex_has_framework_binary=0
-          appex_has_framework_plist=0
-          if [ -f "$appex_framework_binary" ]; then
-            appex_has_framework_binary=1
-          fi
-          if [ -f "$appex_framework_plist" ]; then
-            appex_has_framework_plist=1
-          fi
-          echo
-          echo "--- Embedded framework presence ---"
-          echo "Frameworks/OlcRTCMobile.framework/OlcRTCMobile exists: $appex_has_framework_binary"
-          echo "Frameworks/OlcRTCMobile.framework/Info.plist exists:  $appex_has_framework_plist"
-
-          # Approximate size impact diagnostic. Pure du; ignore errors
-          # because the path may legitimately not exist on
-          # FAIL-NOT-EMBEDDED.
-          if [ -d "$APPEX/Frameworks/OlcRTCMobile.framework" ]; then
+          {
+            echo "=== Copied OlcRTCMobile.framework copies under build/DerivedData ==="
             echo
-            echo "--- du -sh on embedded framework ---"
-            du -sh "$APPEX/Frameworks/OlcRTCMobile.framework" || true
-          fi
 
-          # ---------- C. Main app bundle ----------
-          echo
-          echo "=== C. Main app bundle (if built) ==="
-          if [ -d "$APP" ]; then
-            echo "--- find $APP -maxdepth 4 -print | sort ---"
-            find "$APP" -maxdepth 4 -print 2>/dev/null | sort || true
-
-            echo
-            echo "--- Plugin bundle presence ---"
-            if [ -d "$APP/PlugIns/PacketTunnelProvider.appex" ]; then
-              echo "$APP/PlugIns/PacketTunnelProvider.appex: present"
-              app_has_plugin=1
-            else
-              echo "$APP/PlugIns/PacketTunnelProvider.appex: MISSING"
-              app_has_plugin=0
+            COPIES="$(find build/DerivedData -path '*OlcRTCMobile.framework' -type d -print 2>/dev/null | sort)"
+            if [ -z "$COPIES" ]; then
+              echo "ERROR: no OlcRTCMobile.framework copies found under build/DerivedData" >&2
+              exit 1
             fi
-          else
-            echo "(no $APP — host app not built in this configuration)"
-            app_has_plugin=0
-          fi
 
-          # `.xcframework` directories must NEVER be copied into a
-          # device bundle — Apple's notarization / install code
-          # rejects them outright. The host app's framework copy is
-          # a `.framework` (the iphoneos slice extracted from the
-          # `.xcframework`), and the v10 extension copy should be
-          # the same. If we see a literal `.xcframework` directory
-          # inside the `.app` or the `.appex`, the embed phase is
-          # misconfigured.
-          echo
-          echo "--- .xcframework leak check ---"
-          xcframework_leaks="$( { find "$APP" "$APPEX" -name '*.xcframework' -type d 2>/dev/null || true; } )"
-          if [ -n "$xcframework_leaks" ]; then
-            echo "WARN: .xcframework directories found in bundle:"
-            echo "$xcframework_leaks"
-            has_xcframework_leak=1
-          else
-            echo "(no .xcframework directories inside bundle — OK)"
-            has_xcframework_leak=0
-          fi
+            echo "--- copies found ---"
+            echo "$COPIES"
+          } | tee -a "$REPORT"
 
-          # ---------- D. Linker command + LTO state ----------
-          echo
-          echo "=== D. Ld step for PacketTunnelProvider.appex (from xcodebuild log) ==="
-          ld_step="(unavailable)"
-          if [ -f build/xcodebuild.log ]; then
-            ld_step="$(awk '
-              /^Ld .*PacketTunnelProvider\.appex\/PacketTunnelProvider normal/ { capture=1; print; next }
-              capture==1 && /^[[:space:]]/ { print; next }
-              capture==1 { capture=0 }
-            ' build/xcodebuild.log || true)"
-            echo "$ld_step"
-          else
-            echo "(xcodebuild.log not present)"
-          fi
-
-          compile_has_flto=0
-          if [ -f build/xcodebuild.log ] && \
-             grep -q -- '-flto=' build/xcodebuild.log; then
-            compile_has_flto=1
-          fi
-          ld_has_object_path_lto=0
-          if [ "$ld_step" != "(unavailable)" ] && \
-             echo "$ld_step" | grep -q -- '-object_path_lto'; then
-            ld_has_object_path_lto=1
-          fi
-          echo
-          echo "--- LTO state ---"
-          echo "compile invocations contain -flto=…: $compile_has_flto  (decisive — LTO is actually compiling bitcode)"
-          echo "Ld step contains -object_path_lto: $ld_has_object_path_lto  (NOT decisive — Xcode 16.4 passes this regardless of LLVM_LTO)"
-
-          # APPLICATION_EXTENSION_API_ONLY check.
-          echo
-          echo "--- APPLICATION_EXTENSION_API_ONLY state ---"
-          app_ext_api_only_yes=0
-          if grep -q "APPLICATION_EXTENSION_API_ONLY: YES" \
-             ios/OlcRTCClient/project.yml 2>/dev/null; then
-            app_ext_api_only_yes=1
-          fi
-          echo "APPLICATION_EXTENSION_API_ONLY=YES present in project.yml: $app_ext_api_only_yes"
-
-          # ---------- E. Classification ----------
-          echo
-          echo "=== E. Result classification ==="
-          # v10 primary question: does the `.appex` structurally
-          # contain `Frameworks/OlcRTCMobile.framework`? Final
-          # `otool -L` for the extension binary is a *secondary*
-          # signal — we report it but the probe does not fail just
-          # because ld_prime still drops `LC_LOAD_DYLIB`. dyld will
-          # resolve the embedded copy at runtime regardless of
-          # whether the static load command survives.
-          otool_has_olcrtc=0
-          if otool -L "$APPEX/PacketTunnelProvider" 2>/dev/null \
-              | grep -q "OlcRTCMobile.framework/OlcRTCMobile"; then
-            otool_has_olcrtc=1
-          fi
-
-          classification=""
-          if [ "$app_ext_api_only_yes" -eq 0 ]; then
-            classification="FAIL-API-ONLY-OFF"
-          elif [ "$has_xcframework_leak" -eq 1 ]; then
-            classification="FAIL-XCFRAMEWORK-LEAK"
-          elif [ "$appex_has_framework_binary" -eq 0 ] || \
-               [ "$appex_has_framework_plist" -eq 0 ]; then
-            classification="FAIL-NOT-EMBEDDED"
-          elif [ "$otool_has_olcrtc" -eq 1 ]; then
-            classification="PASS-LINKED-AND-EMBEDDED"
-          else
-            classification="PASS-EMBEDDED"
-          fi
-
-          echo "classification: $classification"
-          echo "  APPLICATION_EXTENSION_API_ONLY=YES: $app_ext_api_only_yes"
-          echo "  appex Frameworks/OlcRTCMobile.framework/OlcRTCMobile present: $appex_has_framework_binary"
-          echo "  appex Frameworks/OlcRTCMobile.framework/Info.plist present:  $appex_has_framework_plist"
-          echo "  otool -L has OlcRTCMobile.framework (secondary):  $otool_has_olcrtc"
-          echo "  .xcframework leak inside bundles:                 $has_xcframework_leak"
-          echo "  compile invocations contain -flto=…:              $compile_has_flto"
-          echo "  Ld step contains -object_path_lto (not decisive): $ld_has_object_path_lto"
-
-          case "$classification" in
-            PASS-EMBEDDED|PASS-LINKED-AND-EMBEDDED)
+          while IFS= read -r copy; do
+            {
               echo
-              echo "OK: PacketTunnelProvider.appex embeds OlcRTCMobile.framework ($classification)."
-              ;;
-            FAIL-API-ONLY-OFF)
-              echo "ERROR: $classification — APPLICATION_EXTENSION_API_ONLY=YES was dropped from project.yml." >&2
-              echo "       The probe must keep this enforced; otherwise a 'pass' would not prove extension-API safety." >&2
+              echo "===================================================="
+              echo "Copy: $copy"
+              echo "===================================================="
+              echo
+              echo "--- find $copy -maxdepth 4 -print | sort ---"
+              find "$copy" -maxdepth 4 -print 2>/dev/null | sort
+
+              fw_binary="$copy/OlcRTCMobile"
+
+              echo
+              echo "--- expected framework binary path: $fw_binary ---"
+              if [ -e "$fw_binary" ]; then
+                echo "exists: yes"
+              else
+                echo "exists: NO"
+              fi
+
+              if [ -e "$fw_binary" ]; then
+                echo
+                echo "--- file $fw_binary ---"
+                file "$fw_binary" || true
+
+                echo
+                echo "--- du -h $fw_binary ---"
+                du -h "$fw_binary" || true
+
+                echo
+                echo "--- otool -hv $fw_binary ---"
+                otool -hv "$fw_binary" 2>/dev/null || true
+
+                echo
+                echo "--- otool -L $fw_binary ---"
+                otool -L "$fw_binary" 2>/dev/null || true
+
+                echo
+                echo "--- nm -gU $fw_binary | grep Mobile(Start|StartWithTransport|IsRunning|SetDebug|Check|Ping) ---"
+                nm -gU "$fw_binary" 2>/dev/null \
+                  | grep -E 'Mobile(Start|StartWithTransport|IsRunning|SetDebug|Check|Ping)' \
+                  | head -50 \
+                  || echo "(no matches)"
+              fi
+
+              if [ -f "$copy/Info.plist" ]; then
+                echo
+                echo "--- plutil -p $copy/Info.plist ---"
+                plutil -p "$copy/Info.plist" || true
+              fi
+            } | tee -a "$REPORT"
+          done <<<"$COPIES"
+
+          echo
+          echo "Copied-frameworks report written to: $REPORT"
+
+      - name: Extract embed-phase log lines
+        run: |
+          set -euo pipefail
+          # Probe v11 — Section C. Pull every line of build/xcodebuild.log
+          # that touches the embed phase for OlcRTCMobile.framework, with
+          # surrounding context so we can see which target's phase
+          # injected the stub binary and what `builtin-copy` arguments
+          # were used. The interesting markers are:
+          #   - "Injecting stub binary into codeless framework"
+          #   - "builtin-copy" (especially with -remove-static-executable)
+          #   - "OlcRTCMobile.framework"
+          #   - "remove-static-executable"
+          mkdir -p build/reports/packet-tunnel-gomobile-probe
+          REPORT=build/reports/packet-tunnel-gomobile-probe/embed-phase-log.txt
+          : > "$REPORT"
+
+          {
+            echo "=== Embed-phase log lines around OlcRTCMobile.framework ==="
+            echo
+
+            if [ ! -f build/xcodebuild.log ]; then
+              echo "ERROR: build/xcodebuild.log missing" >&2
               exit 1
-              ;;
-            FAIL-XCFRAMEWORK-LEAK)
-              echo "ERROR: $classification — a literal .xcframework directory was copied into the app or appex bundle." >&2
-              echo "       Apple's install path rejects .xcframework inside a device bundle." >&2
-              echo "       The embed phase should be copying the iphoneos slice (.framework), not the wrapper." >&2
-              echo "       Inspect the Copy Files (Embed Frameworks) build phase for PacketTunnelProvider." >&2
-              exit 1
-              ;;
-            FAIL-NOT-EMBEDDED)
-              echo "ERROR: $classification — the extension bundle does NOT contain Frameworks/OlcRTCMobile.framework." >&2
-              echo "       embed: true in project.yml did not produce a Copy Files (Embed Frameworks) phase," >&2
-              echo "       or the phase ran but produced no output, or it produced a different layout." >&2
-              echo "       Inspect Section B above and the Ld step in Section D." >&2
+            fi
+
+            echo "--- raw grep with 5 lines of context ---"
+            grep -n -C 5 -E \
+              'Injecting stub binary|codeless framework|builtin-copy|OlcRTCMobile\.framework|remove-static-executable' \
+              build/xcodebuild.log \
+              || echo "(no matching lines)"
+
+            echo
+            echo "--- ad-hoc stub-injection counts per target marker ---"
+            stub_count="$(grep -c 'Injecting stub binary into codeless framework' build/xcodebuild.log || true)"
+            echo "Lines containing 'Injecting stub binary into codeless framework': $stub_count"
+
+            echo
+            echo "--- targets that issued stub-injection notes ---"
+            grep -E 'Injecting stub binary into codeless framework \(in target ' build/xcodebuild.log \
+              | sed -E "s/.*\(in target '([^']+)' from project '([^']+)'\).*/\1 (project \2)/" \
+              | sort -u \
+              || echo "(none)"
+          } | tee -a "$REPORT"
+
+          echo
+          echo "Embed-phase log report written to: $REPORT"
+
+      - name: Classify and summarize v11 diagnostics
+        run: |
+          set -euo pipefail
+          # Probe v11 — Section D. Cross-reference the source slice's
+          # symbols against every copied framework's symbols, plus the
+          # embed-phase log, and write a single summary.md that names
+          # the classification class. v11 is intentionally
+          # non-failing — its purpose is to capture diagnostics, not
+          # to gate the branch — UNLESS the build itself failed (which
+          # would have aborted an earlier step) or the source
+          # xcframework is missing.
+          mkdir -p build/reports/packet-tunnel-gomobile-probe
+          SUMMARY=build/reports/packet-tunnel-gomobile-probe/summary.md
+
+          XCF=ios/OlcRTCClient/Frameworks/OlcRTCMobile.xcframework
+          # The device slice is the one that matters for iphoneos
+          # bundles. gomobile bind produces it under `ios-arm64/`.
+          SRC_SLICE_BIN="$XCF/ios-arm64/OlcRTCMobile.framework/OlcRTCMobile"
+          APP_FW_BIN="build/DerivedData/Build/Products/Release-iphoneos/OlcRTCClient.app/Frameworks/OlcRTCMobile.framework/OlcRTCMobile"
+          APPEX_FW_BIN="build/DerivedData/Build/Products/Release-iphoneos/OlcRTCClient.app/PlugIns/PacketTunnelProvider.appex/Frameworks/OlcRTCMobile.framework/OlcRTCMobile"
+
+          present_or_zero() {
+            # echo 1 if file/symlink exists, else 0
+            if [ -e "$1" ]; then echo 1; else echo 0; fi
+          }
+
+          has_mobile_symbols() {
+            # echo 1 if nm -gU on $1 contains Mobile* gomobile-bound
+            # entrypoints, else 0. Use the same regex as the
+            # diagnostic dumps for consistency.
+            local bin="$1"
+            if [ ! -e "$bin" ]; then echo 0; return; fi
+            if nm -gU "$bin" 2>/dev/null \
+                | grep -q -E 'Mobile(Start|StartWithTransport|IsRunning|SetDebug|Check|Ping)'; then
+              echo 1
+            else
+              echo 0
+            fi
+          }
+
+          file_type() {
+            # echo a short tag: "dynamic" (dyld stub or Mach-O dylib),
+            # "static" (ar archive or Mach-O static lib), or "other".
+            local bin="$1"
+            if [ ! -e "$bin" ]; then echo "missing"; return; fi
+            local out
+            out="$(file -b "$bin" 2>/dev/null || true)"
+            case "$out" in
+              *"dynamically linked shared library"*) echo "dynamic" ;;
+              *"Mach-O 64-bit dynamically linked shared library"*) echo "dynamic" ;;
+              *"current ar archive"*) echo "static-ar" ;;
+              *"Mach-O 64-bit object"*) echo "static-object" ;;
+              *"current ar archive random library"*) echo "static-ar" ;;
+              *) echo "other" ;;
+            esac
+          }
+
+          src_present="$(present_or_zero "$SRC_SLICE_BIN")"
+          src_symbols="$(has_mobile_symbols "$SRC_SLICE_BIN")"
+          src_type="$(file_type "$SRC_SLICE_BIN")"
+
+          app_present="$(present_or_zero "$APP_FW_BIN")"
+          app_symbols="$(has_mobile_symbols "$APP_FW_BIN")"
+          app_type="$(file_type "$APP_FW_BIN")"
+
+          appex_present="$(present_or_zero "$APPEX_FW_BIN")"
+          appex_symbols="$(has_mobile_symbols "$APPEX_FW_BIN")"
+          appex_type="$(file_type "$APPEX_FW_BIN")"
+
+          stub_count="$(grep -c 'Injecting stub binary into codeless framework' build/xcodebuild.log 2>/dev/null || echo 0)"
+
+          # Classification per v11 spec.
+          # The classes name what the diagnostic *found*, not whether
+          # the probe is happy — v11 is a diagnostic run.
+          classification=""
+          if [ "$src_present" -eq 0 ]; then
+            classification="DIAG-SOURCE-MISSING"
+          elif [ "$src_symbols" -eq 0 ]; then
+            classification="DIAG-NO-MOBILE-SYMBOLS-IN-SOURCE"
+          elif [ "$src_type" = "static-ar" ] || [ "$src_type" = "static-object" ]; then
+            # gomobile is supposed to emit a dynamic framework. If the
+            # source binary is actually a static archive, Xcode's
+            # "codeless" classification for the copy makes sense —
+            # `builtin-copy -remove-static-executable` would have
+            # stripped it. This is the unexpected explanation.
+            classification="DIAG-SOURCE-STATIC-FRAMEWORK"
+          elif [ "$appex_present" -eq 1 ] && [ "$appex_symbols" -eq 0 ]; then
+            # Source has Mobile symbols but the copy lands as a stub.
+            # This is the v10 finding restated with the source side
+            # measured: the embed phase actively replaces the real
+            # binary with a stub.
+            classification="DIAG-SOURCE-DYNAMIC-COPIED-STUB"
+          elif [ "$appex_present" -eq 1 ] && [ "$appex_symbols" -eq 1 ]; then
+            # Symbols survive into the copy — embed worked. v10's
+            # codeless-stub log line was misleading or fixed.
+            classification="DIAG-SOURCE-DYNAMIC-COPIED-INTACT"
+          else
+            classification="DIAG-UNKNOWN"
+          fi
+
+          # Build summary.md
+          {
+            echo "# Packet Tunnel Gomobile Probe — v11 diagnostic"
+            echo
+            echo "**Branch:** packet-tunnel-gomobile-probe"
+            echo "**Commit:** \`${GITHUB_SHA:-unknown}\`"
+            echo
+            echo "## Classification"
+            echo
+            echo "\`$classification\`"
+            echo
+            echo "## Symbol survey"
+            echo
+            echo "| location | present | type | has Mobile symbols |"
+            echo "|---|---|---|---|"
+            echo "| source slice (\`ios-arm64/.../OlcRTCMobile\`) | $src_present | $src_type | $src_symbols |"
+            echo "| app embed (\`OlcRTCClient.app/Frameworks/.../OlcRTCMobile\`) | $app_present | $app_type | $app_symbols |"
+            echo "| appex embed (\`.../PacketTunnelProvider.appex/Frameworks/.../OlcRTCMobile\`) | $appex_present | $appex_type | $appex_symbols |"
+            echo
+            echo "## Stub injection"
+            echo
+            echo "- xcodebuild lines matching 'Injecting stub binary into codeless framework': **$stub_count**"
+            echo "- Targets that issued stub-injection notes:"
+            echo
+            echo '```'
+            grep -E 'Injecting stub binary into codeless framework \(in target ' build/xcodebuild.log 2>/dev/null \
+              | sed -E "s/.*\(in target '([^']+)' from project '([^']+)'\).*/- \1 (project \2)/" \
+              | sort -u \
+              || echo "(none)"
+            echo '```'
+            echo
+            echo "## Reports in this artifact"
+            echo
+            echo "- \`source-xcframework.txt\` — full \`find\` / \`file\` / \`otool\` / \`nm -gU\` / \`plutil\` for every framework inside the source \`.xcframework\`, pre-Xcode-build."
+            echo "- \`copied-frameworks.txt\` — same dumps for every \`OlcRTCMobile.framework\` copy Xcode produced under \`build/DerivedData\`."
+            echo "- \`embed-phase-log.txt\` — grep over \`build/xcodebuild.log\` for the embed-phase markers."
+            echo
+            echo "## Hard scope"
+            echo
+            echo "v11 is a pure diagnostic run. The build still does not"
+            echo "drive any VPN runtime — \`PacketTunnelProvider.startTunnel\`"
+            echo "calls \`GomobileExtensionProbe.touchNonStartingAPI()\` and"
+            echo "then returns \`StubError.notWiredYet\`. No \`MobileStart*\`,"
+            echo "no \`MobileCheck\`, no \`MobilePing\`, no sockets, no"
+            echo "\`NEPacketTunnelNetworkSettings\`, no entitlements, no"
+            echo "signing."
+          } > "$SUMMARY"
+
+          # Echo the structured findings to the step console so a
+          # reader can see them without downloading the artifact.
+          echo
+          echo "=== v11 Classification ==="
+          echo "classification: $classification"
+          echo
+          echo "source slice present:      $src_present  ($SRC_SLICE_BIN)"
+          echo "source slice type:         $src_type"
+          echo "source slice has symbols:  $src_symbols"
+          echo
+          echo "app embed present:         $app_present  ($APP_FW_BIN)"
+          echo "app embed type:            $app_type"
+          echo "app embed has symbols:     $app_symbols"
+          echo
+          echo "appex embed present:       $appex_present  ($APPEX_FW_BIN)"
+          echo "appex embed type:          $appex_type"
+          echo "appex embed has symbols:   $appex_symbols"
+          echo
+          echo "stub-injection log lines:  $stub_count"
+          echo
+          echo "summary.md written to:     $SUMMARY"
+
+          # Mirror summary.md to the GitHub Actions job summary so the
+          # run page shows it without artifact download.
+          cat "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+
+          # APPLICATION_EXTENSION_API_ONLY gate — kept from v9/v10 so
+          # a regression in project.yml fails the run loudly.
+          if ! grep -q "APPLICATION_EXTENSION_API_ONLY: YES" \
+                 ios/OlcRTCClient/project.yml 2>/dev/null; then
+            echo "ERROR: APPLICATION_EXTENSION_API_ONLY=YES is no longer in project.yml" >&2
+            echo "       v11 will not pretend the extension's API constraint is intact when it isn't." >&2
+            exit 1
+          fi
+
+          # v11 is diagnostic-only: it only fails if the source slice
+          # is missing entirely (means `gomobile bind` itself broke,
+          # which is upstream of the probe).
+          case "$classification" in
+            DIAG-SOURCE-MISSING)
+              echo "ERROR: $classification — source xcframework slice missing." >&2
+              echo "       This means scripts/build-gomobile-ios.sh did not produce the expected layout." >&2
+              echo "       The diagnostic cannot proceed without it." >&2
               exit 1
               ;;
             *)
-              echo "ERROR: $classification — see diagnostics above." >&2
-              exit 1
+              echo "OK: v11 diagnostic captured ($classification)."
               ;;
           esac
 
-      - name: Probe summary
+      - name: Upload v11 diagnostic report
         if: always()
-        run: |
-          {
-            echo "# Packet Tunnel Gomobile Probe"
-            echo
-            echo "- **Result:** ${{ job.status }}"
-            echo "- **Commit:** \`${{ github.sha }}\`"
-            echo "- **Ref:** \`${{ github.ref }}\`"
-            echo
-            echo "## What this probe means"
-            echo
-            echo "A green run here means the \`PacketTunnelProvider\`"
-            echo "extension target compiled and linked against"
-            echo "\`OlcRTCMobile.xcframework\` under"
-            echo "\`APPLICATION_EXTENSION_API_ONLY = YES\` with code"
-            echo "signing disabled."
-            echo
-            echo "It does **not** mean VPN Mode runtime works. The"
-            echo "extension still does not call any \`MobileStart*\`"
-            echo "from \`startTunnel\` and still fails fast with"
-            echo "\`notWiredYet\`. Real packet routing remains gated"
-            echo "on Milestone 4 in \`docs/ROADMAP.md\`."
-          } >> "$GITHUB_STEP_SUMMARY"
+        uses: actions/upload-artifact@v4
+        with:
+          name: packet-tunnel-gomobile-probe-v11-report
+          path: build/reports/packet-tunnel-gomobile-probe
+          if-no-files-found: warn
+          retention-days: 14

@@ -232,11 +232,19 @@ v10 abandons the link-only model and flips the extension's
 `OlcRTCMobile.xcframework` dependency to `embed: true`, so
 XcodeGen emits a Copy Files (Embed Frameworks) build phase that
 copies the `.framework` into
-`PacketTunnelProvider.appex/Frameworks/`. The `.ipa` therefore
-carries two copies of the Go runtime (~33 MB each — one for the
-host app, one for the extension); the v10 probe accepts that
-duplication as the cost of getting the framework structurally
-embedded in the extension.
+`PacketTunnelProvider.appex/Frameworks/`. The build is
+structurally green — but xcodebuild's embed phase emits
+`Injecting stub binary into codeless framework` for both the
+host app and the extension and replaces the framework binary
+with a 40 KB `/dev/null`-compiled dylib stub. The real Go
+runtime is therefore not actually shipped. v11 is a pure
+diagnostic run that cross-references the source xcframework
+slice's symbols and Mach-O type against the post-embed copies
+and the embed-phase log, writes a structured report under
+`build/reports/packet-tunnel-gomobile-probe/`, and uploads it
+as a workflow artifact. v11 does not change `project.yml`;
+its only job is to answer why Xcode treats the iphoneos slice
+as codeless.
 
 Known risks the probe is intended to surface (record findings here
 once a CI run is available):
