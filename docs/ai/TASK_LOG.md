@@ -9,6 +9,141 @@ Date format: `YYYY-MM-DD`. Each entry should answer **what** changed and
 
 ---
 
+### 2026-05-29 — Probe v10 result: classification = `PASS-EMBEDDED` (extension structurally embeds the framework; Xcode injects a 40 KB codeless stub for the binary)
+
+- Run:
+  [`Packet Tunnel Gomobile Probe` 26632371190](https://github.com/artpm4250-png/olcrtc-ios/actions/runs/26632371190)
+  on commit
+  [`2e8cbcb`](https://github.com/artpm4250-png/olcrtc-ios/commit/2e8cbcb).
+  Conclusion: **success**. Classifier wrote
+  `classification: PASS-EMBEDDED`.
+- **Settings that held.**
+  - `APPLICATION_EXTENSION_API_ONLY=YES present in project.yml: 1`.
+  - `compile invocations contain -flto=…: 0` (LTO genuinely off,
+    same as v7–v9).
+  - Ld step from xcodebuild log still contains
+    `… -dead_strip … -framework OlcRTCMobile -o
+    …/PacketTunnelProvider.appex/PacketTunnelProvider`.
+- **Primary structural facts (Section B).**
+  - `find $APPEX -maxdepth 4 -print | sort` returned exactly:
+    ```
+    .../PacketTunnelProvider.appex
+    .../PacketTunnelProvider.appex/Frameworks
+    .../PacketTunnelProvider.appex/Frameworks/OlcRTCMobile.framework
+    .../PacketTunnelProvider.appex/Frameworks/OlcRTCMobile.framework/Info.plist
+    .../PacketTunnelProvider.appex/Frameworks/OlcRTCMobile.framework/OlcRTCMobile
+    .../PacketTunnelProvider.appex/Info.plist
+    .../PacketTunnelProvider.appex/PacketTunnelProvider
+    ```
+  - `Frameworks/OlcRTCMobile.framework/OlcRTCMobile present: 1`,
+    `Frameworks/OlcRTCMobile.framework/Info.plist present: 1`.
+  - `du -sh` on the embedded framework: **40K**. See the "codeless
+    stub" finding below — this is *not* the 33 MB Go runtime.
+  - `.xcframework leak inside bundles: 0`. The wrapper directory
+    is not copied; only the iphoneos `.framework` slice is.
+  - Host app bundle (Section C): `OlcRTCClient.app/Frameworks/
+    OlcRTCMobile.framework/{OlcRTCMobile, Info.plist}` present;
+    `OlcRTCClient.app/PlugIns/PacketTunnelProvider.appex` present.
+- **Secondary signal (Section A).**
+  `otool -L` on `$APPEX/PacketTunnelProvider` lists `libresolv`,
+  `Foundation`, `libobjc`, `libSystem`, `CoreFoundation`,
+  `NetworkExtension`, `Security`, and the swift dylibs — same as
+  v9. **No `OlcRTCMobile.framework/OlcRTCMobile` entry.**
+  `otool -l … LC_LOAD_DYLIB` confirms it. `nm -u | grep -E
+  'Mobile(IsRunning|SetDebug)'` → `(none)`. ld_prime's
+  `-dead_strip` still nullifies the v9 reference. The
+  classifier treats this as non-fatal in v10 because the
+  structural question is whether the framework is in the
+  `.appex`, not whether the dynamic load command survives —
+  dyld would resolve the embedded copy at runtime if a load
+  command did remain.
+- **Important diagnostic finding — Xcode's "Injecting stub
+  binary into codeless framework".** The xcodebuild log
+  captured this sequence during the extension's embed phase:
+  ```
+  Copy …/PacketTunnelProvider.appex/Frameworks/OlcRTCMobile.framework
+       …/ios/OlcRTCClient/Frameworks/OlcRTCMobile.xcframework/ios-arm64/OlcRTCMobile.framework
+    builtin-copy -exclude .DS_Store -exclude CVS -exclude .svn
+                 -exclude .git -exclude .hg -exclude Headers
+                 -exclude PrivateHeaders -exclude Modules
+                 -exclude *.tbd -resolve-src-symlinks
+                 -remove-static-executable
+                 …/OlcRTCMobile.xcframework/ios-arm64/OlcRTCMobile.framework
+                 …/PacketTunnelProvider.appex/Frameworks
+  note: Injecting stub binary into codeless framework (in target 'PacketTunnelProvider' …)
+    clang … -x c -c /dev/null -target arm64-apple-ios16.0 -o …/arm64-apple.o
+    clang … -dynamiclib -Xlinker -adhoc_codesign … -o …/arm64-apple
+    lipo -create -output …/PacketTunnelProvider.appex/Frameworks/OlcRTCMobile.framework/OlcRTCMobile …/arm64-apple
+  ```
+  Xcode's `builtin-copy` excludes `Headers`, `PrivateHeaders`,
+  `Modules`, and `*.tbd`, then runs
+  `-remove-static-executable`. Whatever heuristic Xcode uses
+  classified the resulting copy as **codeless**, compiled a
+  dylib stub from `/dev/null`, and `lipo`-replaced
+  `OlcRTCMobile.framework/OlcRTCMobile` with that 40 KB stub.
+  The same thing happens for the host app's
+  `OlcRTCClient.app/Frameworks/OlcRTCMobile.framework` — the
+  prior `iOS App + Gomobile Build` pipeline already produced a
+  40 KB codeless stub in the host app on Xcode 16.4; this is
+  not a v10 regression, it is a pre-existing condition the
+  probe surfaced. The real Go runtime body lives in the
+  upstream `OlcRTCMobile.xcframework/ios-arm64/OlcRTCMobile.framework/OlcRTCMobile`
+  (Mach-O on disk in CI), but neither the host app nor the
+  extension picks it up.
+- **What v10 confirms — and what it does NOT confirm.**
+  - Confirmed: XcodeGen's `embed: true, codeSign: false,
+    link: true` on the extension does produce a `Copy Files
+    (Embed Frameworks)` build phase whose output is a
+    structurally valid `.framework` inside the `.appex`. The
+    bundle layout matches Apple's requirements (no
+    `.xcframework` leak, correct `Frameworks/<Name>.framework/
+    {Binary, Info.plist}` shape).
+  - Confirmed: build succeeded under unsigned CI with signing
+    disabled and entitlements detached, so the embed phase did
+    not require a signing identity.
+  - Not confirmed: that the *real* Go runtime is shipped in the
+    bundle. The 40 KB codeless stub is what the `.appex` (and
+    the `.app`) actually carry. At runtime that stub would
+    satisfy dyld's "framework exists" check but would not
+    provide the real `MobileIsRunning` / `MobileSetDebug` /
+    `MobileStart*` symbols. Resolving the codeless-stub
+    behavior is the v11 question, not v10.
+- **Open question for v11.** Why does Xcode 16.4 treat the
+  iphoneos slice from `OlcRTCMobile.xcframework` as codeless
+  when it is copied? The xcframework's `Info.plist` clearly
+  declares an `ios-arm64` `LibraryIdentifier` with a real
+  Mach-O binary in `LibraryPath`. Hypotheses to test in v11
+  (in priority order):
+  1. `gomobile bind`-emitted `Info.plist` is missing the key
+     Xcode needs to recognize the framework as code-bearing
+     (e.g. `CFBundleExecutable`, `MinimumOSVersion`, or a
+     `DTPlatformName`/`DTSDKName` mismatch with the embed
+     target's SDK).
+  2. The `Modules/module.modulemap` is being excluded by the
+     `builtin-copy -exclude Modules` directive, and the
+     resulting binary is technically code-bearing but Xcode
+     misclassifies because the module map is gone. Could test
+     by overriding `EMBEDDED_CONTENT_CONTAINS_SWIFT` or by
+     copying the framework via a custom Script phase instead of
+     XcodeGen's `embed: true`.
+  3. The xcframework's iphoneos slice was built with
+     `-target arm64-apple-ios16.0-simulator` or similar and
+     Xcode considers it ABI-incompatible with iphoneos device
+     embeds. Would show up as a deployment-target/SDK mismatch
+     in `lipo -info` or `vtool -show`.
+  None of these are resolved in v10. v10's job was to verify
+  the structural embed path; the codeless-stub problem is a
+  separate, pre-existing condition.
+- Hard scope reminder. VPN runtime remains stubbed.
+  `PacketTunnelProvider.startTunnel` still returns
+  `StubError.notWiredYet` immediately after the
+  `MobileSetDebug(false)` / `MobileIsRunning()` probe call.
+  No `MobileStart*`, no `MobileCheck`, no `MobilePing`. The
+  unsigned CI build path still does not produce an installable
+  VPN — see [`docs/ai/DECISIONS.md`](DECISIONS.md) ADR-0008.
+
+---
+
 ### 2026-05-29 — Probe v10: flip the extension's `OlcRTCMobile.xcframework` to `embed: true`
 
 - v9's diagnosis (entry below) was that ld_prime's `-dead_strip`
