@@ -39,19 +39,20 @@ import OlcRTCMobile
 ///   - `MobileSetDebug(false)` — configure-only, sets a flag in the Go
 ///     runtime; no network work.
 ///
-/// Both are read-only / configure-only and idempotent. They never run
-/// inside `startTunnel` here — they live behind a function the
-/// extension's principal class doesn't call. The function gets a
-/// `@discardableResult` so the compiler does not strip the body and
-/// the linker still pulls in the symbols at link time.
+/// Probe v9 change: `touchNonStartingAPI()` is now called from the
+/// real `PacketTunnelProvider.startTunnel` entrypoint, before the
+/// existing `notWiredYet` failure. This makes the reference
+/// runtime-observable rather than artificial, proving whether the
+/// linker can preserve the framework dependency when the symbols are
+/// actually reachable from the extension's principal class.
 enum GomobileExtensionProbe {
     /// Reference the symbols without invoking any network behavior.
-    /// Intentionally not called from `startTunnel` — see the file
-    /// header. Marked `@discardableResult` plus a non-Void return so
-    /// the compiler keeps the body intact even with whole-module
-    /// optimization on.
+    /// Called from `startTunnel` in probe v9 to make the reference
+    /// runtime-observable. Marked `@discardableResult` plus a non-Void
+    /// return so the compiler keeps the body intact even with
+    /// whole-module optimization on.
     @discardableResult
-    static func touch() -> Bool {
+    static func touchNonStartingAPI() -> Bool {
         // Configure-only flag. Setting it to `false` makes the call a
         // no-op on a clean process state.
         MobileSetDebug(false)

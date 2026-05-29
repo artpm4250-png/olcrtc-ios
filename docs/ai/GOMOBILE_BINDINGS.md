@@ -208,10 +208,24 @@ The `PacketTunnelProvider` extension target also links
 `OlcRTCMobile.xcframework` under `APPLICATION_EXTENSION_API_ONLY =
 YES` as of the `packet-tunnel-gomobile-probe` branch. This is a
 **link probe only** — `Sources/PacketTunnelProvider/GomobileExtensionProbe.swift`
-references `MobileIsRunning()` and `MobileSetDebug(false)` so the
-extension's linker actually pulls in symbols from the framework, but
-the extension's `startTunnel` does NOT call any `MobileStart*` /
+exposes `GomobileExtensionProbe.touchNonStartingAPI()`, which
+references `MobileIsRunning()` and `MobileSetDebug(false)`. As of
+probe v9 that helper is called from
+`PacketTunnelProvider.startTunnel` immediately before the existing
+`StubError.notWiredYet` failure, so the reference is reachable from
+the extension's `NSExtensionPrincipalClass` — a runtime entrypoint
+ld_prime cannot strip without breaking the extension contract.
+The extension still does NOT call any `MobileStart*` /
 `MobileCheck` / `MobilePing` and does NOT bring up a tunnel.
+
+Probe history (full chain in `docs/ai/TASK_LOG.md`): v2–v8 tried
+progressively more aggressive artificial anchors — Swift stored
+properties, `-Wl,-u` linker forces, `-Wl,-needed_framework`, C
+functions with `__attribute__((used, noinline, optnone))`, static
+function-pointer initializers, `__attribute__((constructor))` —
+and every one was stripped by ld_prime's regular dead-strip on
+Xcode 16.4 / iOS 18.5 SDK. v9 abandons the anchor approach
+entirely and uses the real `startTunnel` entrypoint instead.
 
 Known risks the probe is intended to surface (record findings here
 once a CI run is available):

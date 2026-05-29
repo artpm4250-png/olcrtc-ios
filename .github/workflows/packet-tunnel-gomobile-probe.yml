@@ -110,13 +110,28 @@ jobs:
           # if the link edge to OlcRTCMobile is silently dropped, the
           # extension still compiles but ships without any gomobile
           # symbol references — and we'd be reporting a green probe
-          # that didn't actually exercise the framework. Probes v2-v5
-          # walked through Swift WMO elision, ld dead-strip, ld_prime
-          # `-needed_framework` shadowing, and LTO call-site folding;
-          # see `docs/ai/TASK_LOG.md`. The v6 confirm step inspects
-          # both the final extension binary and the per-translation-
-          # unit `.o` files so a future failure points at the exact
-          # layer that ate the references.
+          # that didn't actually exercise the framework.
+          #
+          # Probe history (see `docs/ai/TASK_LOG.md`):
+          # - v2 used a Swift stored property calling `MobileIsRunning`
+          #   — eliminated by Swift WMO before the linker ran.
+          # - v3 added `-Wl,-u,_MobileIsRunning` — ld dead-stripped the
+          #   framework anyway.
+          # - v4 added `-Wl,-needed_framework,OlcRTCMobile` — ld_prime
+          #   allowed the trailing `-framework OlcRTCMobile` to shadow
+          #   the `needed` flag.
+          # - v5 moved the anchor to a C function with
+          #   `__attribute__((used))` — symbol survived, body folded.
+          # - v6 used static function-pointer initializers — relocations
+          #   nullified.
+          # - v7 disabled LTO — proved LTO was not the cause.
+          # - v8 added `__attribute__((constructor))` — still stripped.
+          # - v9 (this run) drops every artificial anchor and instead
+          #   calls `GomobileExtensionProbe.touchNonStartingAPI()` from
+          #   `PacketTunnelProvider.startTunnel`, which is reachable
+          #   from the extension's `NSExtensionPrincipalClass` —
+          #   ld_prime cannot strip code reachable from the principal
+          #   class without breaking the extension contract.
           APPEX="build/DerivedData/Build/Products/Release-iphoneos/PacketTunnelProvider.appex"
           if [ ! -d "$APPEX" ]; then
             echo "ERROR: extension bundle missing at $APPEX" >&2
@@ -137,6 +152,11 @@ jobs:
           otool -L "$APPEX/PacketTunnelProvider" || true
 
           echo
+          echo "--- otool -l | grep -A2 LC_LOAD_DYLIB (load commands) ---"
+          otool -l "$APPEX/PacketTunnelProvider" 2>/dev/null \
+            | grep -A 2 -E 'LC_LOAD_DYLIB|LC_LOAD_WEAK_DYLIB' || true
+
+          echo
           echo "--- nm -u | grep Mobile(IsRunning|SetDebug) (final binary undef refs) ---"
           # Capture without piping into grep first: an empty grep result
           # under `set -euo pipefail` would abort the step with a
@@ -145,16 +165,6 @@ jobs:
             | grep -E 'Mobile(IsRunning|SetDebug)' || true)"
           if [ -n "$final_mobile_undefs" ]; then
             echo "$final_mobile_undefs"
-          else
-            echo "(none)"
-          fi
-
-          echo
-          echo "--- nm | grep OlcRTCExtensionGomobileLinkAnchor|OlcRTCGomobile (final binary defined symbols) ---"
-          final_anchor_defs="$(nm "$APPEX/PacketTunnelProvider" 2>/dev/null \
-            | grep -E 'OlcRTCExtensionGomobileLinkAnchor|OlcRTCGomobile' || true)"
-          if [ -n "$final_anchor_defs" ]; then
-            echo "$final_anchor_defs"
           else
             echo "(none)"
           fi
@@ -179,7 +189,7 @@ jobs:
             echo
             echo "--- $obj ---"
             mobile_in_obj="$(nm "$obj" 2>/dev/null \
-              | grep -E 'Mobile(IsRunning|SetDebug)|OlcRTCExtensionGomobileLinkAnchor|OlcRTCGomobile' \
+              | grep -E 'Mobile(IsRunning|SetDebug)' \
               || true)"
             if [ -n "$mobile_in_obj" ]; then
               echo "$mobile_in_obj"
@@ -214,17 +224,9 @@ jobs:
             echo "(xcodebuild.log not present)"
           fi
 
-          # LTO detection — corrected after probe v7 (see
-          # `docs/ai/TASK_LOG.md` —
-          # `2026-05-29 — Probe v7 result`). Xcode 16.4 passes
-          # `-Xlinker -object_path_lto -Xlinker …_lto.o` to ld in
-          # Release iphoneos builds **unconditionally**, even when
-          # `LLVM_LTO = NO` and no input .o file contains LTO
-          # bitcode. The presence of `-object_path_lto` is
-          # therefore not a reliable signal of "LTO actually
-          # ran". The decisive signal is whether the per-TU clang
-          # / swiftc compile invocations carry `-flto=…`. We
-          # search the captured xcodebuild log for that.
+          # LTO state diagnostics (kept from v8). The classifier no
+          # longer reads either signal — they are printed as context
+          # only.
           compile_has_flto=0
           if [ -f build/xcodebuild.log ] && \
              grep -q -- '-flto=' build/xcodebuild.log; then
@@ -240,18 +242,26 @@ jobs:
           echo "compile invocations contain -flto=…: $compile_has_flto  (decisive — LTO is actually compiling bitcode)"
           echo "Ld step contains -object_path_lto: $ld_has_object_path_lto  (NOT decisive — Xcode 16.4 passes this regardless of LLVM_LTO)"
 
+          # APPLICATION_EXTENSION_API_ONLY check — confirm the setting
+          # remains enabled on the extension target after v9's
+          # changes. We do not want the probe to "pass" because the
+          # build silently dropped the constraint.
+          echo
+          echo "--- APPLICATION_EXTENSION_API_ONLY state ---"
+          app_ext_api_only_yes=0
+          if grep -q "APPLICATION_EXTENSION_API_ONLY: YES" \
+             ios/OlcRTCClient/project.yml 2>/dev/null; then
+            app_ext_api_only_yes=1
+          fi
+          echo "APPLICATION_EXTENSION_API_ONLY=YES present in project.yml: $app_ext_api_only_yes"
+
           # ---------- D. Classification ----------
           echo
           echo "=== D. Result classification ==="
-          # The build step ran to completion (we are in the confirm
-          # step), so FAIL-COMPILE and FAIL-LINK do not apply here —
-          # those would have aborted the previous step with a clang
-          # or ld diagnostic. Probe v7 introduced
-          # `FAIL-LTO-STILL-ENABLED`; v8 retires it because it
-          # double-counted Xcode 16.4's unconditional
-          # `-object_path_lto`. The actual LTO state is printed
-          # above as diagnostic; classification depends only on
-          # symbol facts.
+          # v9 simplifies classification: the question is whether the
+          # final binary's load commands carry OlcRTCMobile. The
+          # intermediate `.o` state is kept as a diagnostic to point
+          # at the failing layer if the final binary does not.
           otool_has_olcrtc=0
           if otool -L "$APPEX/PacketTunnelProvider" 2>/dev/null \
               | grep -q "OlcRTCMobile.framework/OlcRTCMobile"; then
@@ -259,7 +269,9 @@ jobs:
           fi
 
           classification=""
-          if [ "$otool_has_olcrtc" -eq 1 ] && [ -n "$final_mobile_undefs" ]; then
+          if [ "$app_ext_api_only_yes" -eq 0 ]; then
+            classification="FAIL-API-ONLY-OFF"
+          elif [ "$otool_has_olcrtc" -eq 1 ] && [ -n "$final_mobile_undefs" ]; then
             classification="PASS"
           elif [ "$otool_has_olcrtc" -eq 1 ] && [ -z "$final_mobile_undefs" ]; then
             # Load command is present but no surviving undef refs.
@@ -275,6 +287,7 @@ jobs:
           fi
 
           echo "classification: $classification"
+          echo "  APPLICATION_EXTENSION_API_ONLY=YES: $app_ext_api_only_yes"
           echo "  otool -L has OlcRTCMobile.framework: $otool_has_olcrtc"
           echo "  final binary has Mobile* undef refs: $([ -n "$final_mobile_undefs" ] && echo 1 || echo 0)"
           echo "  intermediate .o has Mobile* undef refs: $obj_has_mobile_refs"
@@ -287,17 +300,24 @@ jobs:
               echo
               echo "OK: PacketTunnelProvider.appex links against OlcRTCMobile ($classification)."
               ;;
+            FAIL-API-ONLY-OFF)
+              echo "ERROR: $classification — APPLICATION_EXTENSION_API_ONLY=YES was dropped from project.yml." >&2
+              echo "       The probe must keep this enforced; otherwise a 'pass' would not prove extension-API safety." >&2
+              exit 1
+              ;;
             FAIL-STRIPPED-BEFORE-LINK)
               echo "ERROR: $classification — no Mobile(IsRunning|SetDebug) refs survived in any extension .o file." >&2
               echo "       The references were eliminated before the linker ran (clang / Swift / LTO bitcode stage)." >&2
-              echo "       Inspect Sources/PacketTunnelProvider/GomobileExtensionLinkAnchor.m" >&2
-              echo "       and the per-target Swift compile units." >&2
+              echo "       Inspect Sources/PacketTunnelProvider/GomobileExtensionProbe.swift" >&2
+              echo "       and Sources/PacketTunnelProvider/PacketTunnelProvider.swift." >&2
               exit 1
               ;;
             FAIL-STRIPPED-AFTER-LINK)
               echo "ERROR: $classification — Mobile* refs were present in intermediate .o files but the final binary has no OlcRTCMobile load command." >&2
               echo "       The linker dropped the references during ld / LTO native code generation." >&2
               echo "       Check the captured Ld step above and OTHER_LDFLAGS in project.yml." >&2
+              echo "       v9 makes the reference reachable from startTunnel (the extension's principal class) —" >&2
+              echo "       if this still fails, the next step is to switch the framework dependency to embed: true." >&2
               exit 1
               ;;
             *)

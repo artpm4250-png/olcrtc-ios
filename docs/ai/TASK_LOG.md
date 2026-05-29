@@ -9,6 +9,116 @@ Date format: `YYYY-MM-DD`. Each entry should answer **what** changed and
 
 ---
 
+### 2026-05-29 — Probe v9: real `startTunnel` entrypoint reference
+
+- v8 (entry below) confirmed that every artificial anchor we had
+  tried — Swift stored properties, C functions with
+  `__attribute__((used, noinline, optnone))`, `-Wl,-u` linker
+  forces, `__attribute__((constructor))` functions registered via
+  `__DATA,__mod_init_func` — was stripped by ld_prime's regular
+  dead-strip on Xcode 16.4 / iOS 18.5 SDK. Symbol storage survived
+  when `__attribute__((used))` was applied to data; the *call
+  instructions* inside the kept anchor bodies were rewritten to
+  no-ops, so the data relocations that would have pulled in
+  `LC_LOAD_DYLIB` for `OlcRTCMobile` never made it into the final
+  binary. The diagnosis at the end of the v8 result said the only
+  remaining moves were (a) make the reference live from a real
+  runtime entrypoint or (c) flip the framework dependency to
+  `embed: true`. v9 takes option (a) first because it's the
+  lighter touch and the answer it returns is the more informative
+  one — if a reference from the principal class's `startTunnel`
+  is *still* stripped, then `embed: true` is genuinely the only
+  remaining lever, and we know that without having paid the
+  double-embed cost yet.
+- File changes (all on branch `packet-tunnel-gomobile-probe`):
+  - `ios/OlcRTCClient/Sources/PacketTunnelProvider/GomobileExtensionProbe.swift`:
+    renamed the helper from `touch()` to `touchNonStartingAPI()`
+    and updated the docblock to reflect that the helper is now
+    called from the real `startTunnel`. The body is unchanged:
+    `MobileSetDebug(false)` then `return MobileIsRunning()`. No
+    `MobileStart*`, no `MobileCheck`, no `MobilePing`, no
+    sockets, no `NEPacketTunnelNetworkSettings`,
+    no `NEPacketTunnelFlow`.
+  - `ios/OlcRTCClient/Sources/PacketTunnelProvider/PacketTunnelProvider.swift`:
+    removed the v8 `_gomobileLinkAnchor` stored property
+    (Swift WMO + ld dead-strip wiped it out at v8). Added a
+    `#if canImport(OlcRTCMobile)` block inside
+    `startTunnel(options:completionHandler:)` immediately before
+    the existing `completionHandler(StubError.notWiredYet)`. The
+    block calls `GomobileExtensionProbe.touchNonStartingAPI()`
+    and logs the result via `NSLog` so the reference is
+    runtime-observable. The fail-fast `notWiredYet` is still the
+    only thing `startTunnel` reports back to NE.
+  - `ios/OlcRTCClient/Sources/PacketTunnelProvider/GomobileExtensionLinkAnchor.m`:
+    deleted. The linker-forced anchor (`-Wl,-u,…`), the
+    `__attribute__((constructor))` anchor, and the
+    `OlcRTCGomobileBoolSink` data sink are all gone. None of
+    them survived v8, and keeping them around alongside the v9
+    real-entrypoint path would have muddied the diagnostic if
+    the next run failed.
+  - `ios/OlcRTCClient/project.yml`:
+    `APPLICATION_EXTENSION_API_ONLY: YES`, `LLVM_LTO: NO`,
+    `FRAMEWORK_SEARCH_PATHS`, and the
+    `embed: false / codeSign: false / link: true` framework
+    dependency are all kept. `OTHER_LDFLAGS` is reduced to
+    `$(inherited) -lresolv` — the
+    `-Wl,-u,_OlcRTCExtensionGomobileLinkAnchor` force-load is
+    removed since its target symbol no longer exists, and v9 is
+    not relying on linker tricks. Signing stays disabled,
+    entitlements stay detached.
+  - `.github/workflows/packet-tunnel-gomobile-probe.yml`:
+    the classifier keeps the v8 split between
+    `PASS`/`PASS-WEAK`/`FAIL-STRIPPED-BEFORE-LINK`/
+    `FAIL-STRIPPED-AFTER-LINK`/`FAIL-OTHER`. New for v9: an
+    `APPLICATION_EXTENSION_API_ONLY=YES` check on the source
+    `project.yml` adds a `FAIL-API-ONLY-OFF` class so a regressed
+    setting cannot silently turn a real failure into a "pass".
+    Section A also dumps `otool -l` `LC_LOAD_DYLIB` /
+    `LC_LOAD_WEAK_DYLIB` blocks alongside the existing `otool -L`
+    and `nm -u | grep Mobile…`, since v9's question is exactly
+    whether the dynamic framework dependency survives. The
+    obsolete `nm | grep OlcRTCExtensionGomobileLinkAnchor` and
+    `OlcRTCGomobile` greps were dropped — those symbols no
+    longer exist in v9.
+- What we are testing in v9. The extension's
+  `NSExtensionPrincipalClass` is `PacketTunnelProvider`. iOS
+  loads the `.appex` and dispatches into `startTunnel` when the
+  system spins up the tunnel; `startTunnel` is by construction a
+  root of the binary's reachability graph that ld cannot drop.
+  v9 puts the `MobileSetDebug` / `MobileIsRunning` references
+  inside that override body. If ld_prime still nullifies those
+  call instructions, the conclusion is that ld is willing to
+  strip *any* code path it can't prove is reachable from `_main`
+  at link time — which, for an `app-extension` target with no
+  `_main`, would mean nothing short of `embed: true` works.
+- Expectations.
+  - Build should succeed — the call surface is unchanged from
+    the v8 build, only the call site moved.
+  - `APPLICATION_EXTENSION_API_ONLY=YES` should remain reported
+    by the classifier (the setting is untouched in `project.yml`).
+  - The intermediate `.o` for `PacketTunnelProvider.swift` should
+    carry `U _MobileIsRunning` and `U _MobileSetDebug` (same as
+    every probe since v6).
+  - The final binary should show `OlcRTCMobile.framework/OlcRTCMobile`
+    in `otool -L` AND `_MobileIsRunning` + `_MobileSetDebug` as
+    undefined refs in `nm -u`. If both hold, classification is
+    `PASS`. If `otool -L` holds but `nm -u` is empty,
+    `PASS-WEAK`. If neither holds despite the intermediate
+    `.o` refs, `FAIL-STRIPPED-AFTER-LINK` — and the next move
+    is option (c): switch to `embed: true` on the extension's
+    framework dependency. The v9 classifier prints that hint in
+    the failure path.
+- Hard scope reminder. VPN runtime is still stubbed:
+  `startTunnel` returns `StubError.notWiredYet`. The probe call
+  is fully gated by `#if canImport(OlcRTCMobile)`, runs no
+  `MobileStart*` / `MobileCheck` / `MobilePing`, opens no
+  sockets, and does not touch `NEPacketTunnelNetworkSettings`
+  or `NEPacketTunnelFlow`. The unsigned CI build path still
+  produces no installable VPN — see
+  [`docs/ai/DECISIONS.md`](DECISIONS.md) ADR-0008.
+
+---
+
 ### 2026-05-29 — Probe v8 result: classification = `FAIL-STRIPPED-AFTER-LINK` (constructor anchor did not survive either)
 
 - Run:
