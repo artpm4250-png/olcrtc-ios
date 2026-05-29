@@ -64,14 +64,36 @@ public struct SharedConfigStore {
         category: "config"
     )
 
-    public init() {}
+    /// Resolves to the JSON file URL inside the App Group container,
+    /// or `nil` when the container is unavailable (unsigned CI path).
+    /// Stored as a closure so the test-friendly init can pin a fixed
+    /// URL without changing the read paths.
+    private let resolveFileURL: () -> URL?
+
+    /// Production initializer. Reads/writes
+    /// `<AppGroup container>/packet-tunnel-config.json`. Degrades to
+    /// no-op behavior when the container is unavailable.
+    public init() {
+        self.resolveFileURL = {
+            AppGroup.containerURL()?
+                .appendingPathComponent(SharedConfigStore.fileName, isDirectory: false)
+        }
+    }
+
+    /// Direct-URL initializer for tests and for callers that want to
+    /// pin a specific file path (e.g. a debug snapshot). Bypasses
+    /// `AppGroup.containerURL()` entirely; the caller owns the URL
+    /// and must guarantee its parent directory is writable.
+    public init(fileURL: URL) {
+        self.resolveFileURL = { fileURL }
+    }
 
     /// Encode the config to JSON and write it atomically into the
     /// shared container. Throws `Error.containerUnavailable` in the
     /// unsigned-CI path; callers should treat that as a non-fatal
     /// log-and-continue.
     public func save(_ config: PacketTunnelConfig) throws {
-        guard let url = Self.fileURL() else {
+        guard let url = resolveFileURL() else {
             AppGroup.warnContainerUnavailableOnce()
             throw Error.containerUnavailable
         }
@@ -96,7 +118,7 @@ public struct SharedConfigStore {
     /// distinguish "no config" from "decode failure" can read
     /// the `os_log` output (sanitized — no `keyHex` ever printed).
     public func load() -> PacketTunnelConfig? {
-        guard let url = Self.fileURL() else {
+        guard let url = resolveFileURL() else {
             AppGroup.warnContainerUnavailableOnce()
             return nil
         }
@@ -124,7 +146,7 @@ public struct SharedConfigStore {
     /// container is unavailable.
     @discardableResult
     public func clear() -> Bool {
-        guard let url = Self.fileURL() else {
+        guard let url = resolveFileURL() else {
             AppGroup.warnContainerUnavailableOnce()
             return false
         }
@@ -138,9 +160,5 @@ public struct SharedConfigStore {
                    log: Self.log, type: .error, String(describing: error))
             return false
         }
-    }
-
-    private static func fileURL() -> URL? {
-        AppGroup.containerURL()?.appendingPathComponent(fileName, isDirectory: false)
     }
 }

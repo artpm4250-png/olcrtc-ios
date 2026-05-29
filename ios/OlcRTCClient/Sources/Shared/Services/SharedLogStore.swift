@@ -45,16 +45,36 @@ public struct SharedLogStore {
     )
 
     private let byteCap: Int
+    private let resolveFileURL: () -> URL?
 
+    /// Production initializer. Reads/writes
+    /// `<AppGroup container>/extension.log`. Degrades to no-op
+    /// behavior when the container is unavailable.
     public init(byteCap: Int = SharedLogStore.defaultByteCap) {
         self.byteCap = byteCap
+        self.resolveFileURL = {
+            AppGroup.containerURL()?
+                .appendingPathComponent(SharedLogStore.fileName, isDirectory: false)
+        }
+    }
+
+    /// Direct-URL initializer for tests and for callers that want to
+    /// pin a specific file path. Bypasses `AppGroup.containerURL()`
+    /// entirely; the caller owns the URL and must guarantee its
+    /// parent directory is writable.
+    public init(
+        fileURL: URL,
+        byteCap: Int = SharedLogStore.defaultByteCap
+    ) {
+        self.byteCap = byteCap
+        self.resolveFileURL = { fileURL }
     }
 
     /// Append a single sanitized line. Adds a trailing newline if
     /// the input does not have one. Silently drops the line if the
     /// shared container is unavailable.
     public func append(_ sanitizedLine: String) {
-        guard let url = Self.fileURL() else {
+        guard let url = resolveFileURL() else {
             AppGroup.warnContainerUnavailableOnce()
             return
         }
@@ -84,7 +104,7 @@ public struct SharedLogStore {
     /// first. Returns `[]` if the container is unavailable or the
     /// file does not exist yet.
     public func readAll() -> [String] {
-        guard let url = Self.fileURL() else {
+        guard let url = resolveFileURL() else {
             AppGroup.warnContainerUnavailableOnce()
             return []
         }
@@ -101,7 +121,7 @@ public struct SharedLogStore {
     /// unavailable.
     @discardableResult
     public func clear() -> Bool {
-        guard let url = Self.fileURL() else {
+        guard let url = resolveFileURL() else {
             AppGroup.warnContainerUnavailableOnce()
             return false
         }
@@ -134,9 +154,5 @@ public struct SharedLogStore {
             slice = slice.subdata(in: (nl + 1)..<slice.count)
         }
         try? slice.write(to: url, options: [.atomic])
-    }
-
-    private static func fileURL() -> URL? {
-        AppGroup.containerURL()?.appendingPathComponent(fileName, isDirectory: false)
     }
 }

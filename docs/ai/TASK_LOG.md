@@ -9,6 +9,110 @@ Date format: `YYYY-MM-DD`. Each entry should answer **what** changed and
 
 ---
 
+### 2026-05-29 — Milestone 3.5 stage 4: LogsView ⇄ SharedLogStore mirror + unit tests, `packet-tunnel-runtime-skeleton`
+
+- Closes the last open thread in Milestone 3.5 by wiring the host
+  app's Logs tab to the App Group log file the extension writes via
+  `SharedLogStore.append`, and adds unit tests for both shared
+  stores using a test-friendly URL-injection init. Same branch
+  (`packet-tunnel-runtime-skeleton`); Stage 3 was committed as
+  `98773e0` and pushed before this entry began.
+- `ios/OlcRTCClient/Sources/Shared/Services/SharedConfigStore.swift`
+  (edited). Refactors the file-URL lookup from a static method into
+  a stored closure assigned in the initializer. Adds a second
+  initializer `init(fileURL: URL)` that pins a fixed file path and
+  bypasses `AppGroup.containerURL()`. The production
+  `init()` keeps the App Group lookup so no caller-visible behavior
+  changes; tests and any future special-case caller (debug snapshot,
+  recovery tool) can use the new init to write/read a file outside
+  the App Group container. No format change to the on-disk JSON.
+- `ios/OlcRTCClient/Sources/Shared/Services/SharedLogStore.swift`
+  (edited). Same refactor as `SharedConfigStore`. Adds a second
+  initializer `init(fileURL:byteCap:)` with the same default
+  `byteCap = 64 KiB`. Truncation logic and append semantics are
+  unchanged. The production `init(byteCap:)` is preserved
+  unchanged.
+- `ios/OlcRTCClient/Sources/App/AppState.swift` (edited):
+    - Adds `private let sharedLogStore = SharedLogStore()` and
+      `private var mirroredExtensionLines: Set<String>`.
+    - Adds `mirrorExtensionLogs()` — pulls
+      `sharedLogStore.readAll()`, inserts each line into the
+      content-keyed seen-set, and for each newly-seen line calls
+      the existing `appendLog(_:)` (which sanitizes, timestamps,
+      and respects the existing 500-line cap). If at least one new
+      line was mirrored, appends a `"[mirror] pulled N new
+      extension log line(s) from App Group"` summary line so the
+      operator can tell when an out-of-band refresh actually
+      delivered content.
+    - Extends `clearLogs()` to also reset
+      `mirroredExtensionLines` so a user pressing Clear re-pulls
+      the extension's history on the next mirror invocation
+      instead of dropping it permanently.
+    - Edge case recorded in the docblock: legitimate identical
+      sanitized lines emitted twice by the extension collapse to
+      one in the merged view. Acceptable for an MVP because the
+      extension's log lines almost always vary in some token
+      (status, error message, reason code); content dedup was
+      chosen over watermark-by-index because `SharedLogStore`
+      head-truncation moves indices.
+- `ios/OlcRTCClient/Sources/App/Views/LogsView.swift` (edited).
+  Calls `state.mirrorExtensionLogs()` from two new affordances:
+  `.refreshable { ... }` on the scroll view (pull-to-refresh) and
+  `.onAppear { ... }` on the outer container. Both call sites are
+  idempotent thanks to the content-keyed dedup in
+  `mirrorExtensionLogs`. No other view changes.
+- `ios/OlcRTCClient/Tests/OlcRTCClientTests/SharedConfigStoreTests.swift`
+  (new). Constructs the store with a tmp-dir file URL so the test
+  runner does not need an App Group entitlement. Covers:
+    - `load()` returns nil when the file is missing.
+    - `save(_:)` → `load()` round-trips every field of
+      `PacketTunnelConfig`.
+    - A second `save(_:)` overwrites the first.
+    - `clear()` removes the file and returns true; subsequent
+      `clear()` returns false; `load()` returns nil afterwards.
+    - The serialized JSON uses sorted keys (verified by checking
+      `clientID` < `debug` < `dnsServer` ordering in the on-disk
+      text). This protects future diff-based debugging.
+    - `load()` returns nil (does NOT throw) on malformed JSON;
+      callers depend on this for the
+      "fall back to providerConfiguration" path in the extension.
+- `ios/OlcRTCClient/Tests/OlcRTCClientTests/SharedLogStoreTests.swift`
+  (new). Pins `byteCap = 512` so truncation is reachable in a
+  handful of appends. Covers:
+    - `readAll()` empty when the file is missing.
+    - `append` then `readAll` preserves order.
+    - `append` adds a trailing newline when missing and does
+      NOT double-up an existing newline.
+    - `clear()` returns true / false consistently with file
+      presence.
+    - **Truncation:** 30 appends @ ~38 bytes each = ~1140 bytes
+      total raw. After the loop the file size is bounded by
+      `byteCap`; the newest line always survives; the oldest few
+      lines are gone; remaining lines preserve append order.
+    - **Line-boundary alignment:** after head-truncation, every
+      surviving line starts with the expected prefix (`entry-`),
+      proving the truncation routine aligns to the next newline
+      and does not cut mid-line.
+- Files in this entry:
+    - `ios/OlcRTCClient/Sources/Shared/Services/SharedConfigStore.swift` (edited)
+    - `ios/OlcRTCClient/Sources/Shared/Services/SharedLogStore.swift` (edited)
+    - `ios/OlcRTCClient/Sources/App/AppState.swift` (edited)
+    - `ios/OlcRTCClient/Sources/App/Views/LogsView.swift` (edited)
+    - `ios/OlcRTCClient/Tests/OlcRTCClientTests/SharedConfigStoreTests.swift` (new)
+    - `ios/OlcRTCClient/Tests/OlcRTCClientTests/SharedLogStoreTests.swift` (new)
+    - `docs/ai/TASK_LOG.md` (this entry)
+- Hard scope reminder. Stage 4 closes Milestone 3.5. The extension
+  still calls only `MobileSetDebug(false)` + `MobileIsRunning()`
+  and returns `StubError.notWiredYet`. No `MobileStart*`, no
+  `MobileCheck`, no `MobilePing`, no sockets, no
+  `NEPacketTunnelNetworkSettings`, no `NEPacketTunnelFlow`, no
+  signing, no entitlement attachment. The unsigned CI build still
+  produces no installable VPN (ADR-0008). Milestone 4 is the next
+  milestone and remains resource-blocked on an Apple Developer
+  account, not code-blocked.
+
+---
+
 ### 2026-05-29 — Milestone 3.5 stage 3: App Group + shared configuration / log surface (unsigned-safe), host-app save hook, `packet-tunnel-runtime-skeleton`
 
 - Follows the Milestone 3.5 start entry directly below. Same branch

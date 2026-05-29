@@ -24,6 +24,12 @@ struct LogsView: View {
                         proxy.scrollTo(newValue - 1, anchor: .bottom)
                     }
                 }
+                .refreshable {
+                    state.mirrorExtensionLogs()
+                }
+            }
+            .onAppear {
+                state.mirrorExtensionLogs()
             }
             .navigationTitle("Logs")
             .toolbar {
