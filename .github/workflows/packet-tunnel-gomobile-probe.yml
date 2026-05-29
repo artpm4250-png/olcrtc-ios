@@ -84,6 +84,11 @@ jobs:
       - name: Build PacketTunnelProvider via host scheme (unsigned, Release, iphoneos generic)
         run: |
           set -euo pipefail
+          mkdir -p build
+          # Tee xcodebuild's full stdout/stderr to build/xcodebuild.log so
+          # the next step can quote the relevant Ld invocation directly,
+          # while still streaming the same lines to the GitHub Actions
+          # console for live debugging.
           xcodebuild \
             -project ios/OlcRTCClient/OlcRTCClient.xcodeproj \
             -scheme OlcRTCClient \
@@ -94,7 +99,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            build
+            build 2>&1 | tee build/xcodebuild.log
 
       - name: Confirm extension binary actually linked against OlcRTCMobile
         run: |
@@ -102,10 +107,11 @@ jobs:
           # The host scheme depends on PacketTunnelProvider, so a green
           # build above means the extension's compile + link path
           # succeeded. We need a stronger check than "the file exists":
-          # if Swift dead-code-strips our probe, the extension still
-          # compiles but the OlcRTCMobile link edge silently disappears
-          # — and we'd be reporting a green probe that didn't actually
-          # exercise the linker. Assert the link edge is real.
+          # if the link edge to OlcRTCMobile is silently dropped, the
+          # extension still compiles but ships without any gomobile
+          # symbol references — and we'd be reporting a green probe
+          # that didn't actually exercise the framework. Assert the
+          # link edge is real.
           APPEX="build/DerivedData/Build/Products/Release-iphoneos/PacketTunnelProvider.appex"
           if [ ! -d "$APPEX" ]; then
             echo "ERROR: extension bundle missing at $APPEX" >&2
@@ -118,43 +124,87 @@ jobs:
 
           file "$APPEX/PacketTunnelProvider"
 
-          echo "--- otool -L (libraries linked) ---"
+          echo
+          echo "--- otool -L (full library list) ---"
           otool -L "$APPEX/PacketTunnelProvider"
 
           echo
-          echo "--- nm -u | grep Mobile (count of OlcRTCMobile-prefixed undefined symbol refs) ---"
-          mobile_undef=$(nm -u "$APPEX/PacketTunnelProvider" 2>/dev/null | grep -c "Mobile" || true)
-          echo "$mobile_undef"
+          echo "--- nm -u (Mobile-related undefined symbols) ---"
+          # Capture without piping into grep first: an empty grep result
+          # under \`set -euo pipefail\` would abort the step with a
+          # confusing exit code 1. Compute the lines, then assert
+          # explicitly below.
+          mobile_undefs="$(nm -u "$APPEX/PacketTunnelProvider" 2>/dev/null | grep -E 'Mobile(IsRunning|SetDebug)' || true)"
+          if [ -n "$mobile_undefs" ]; then
+            echo "$mobile_undefs"
+          else
+            echo "(none — no MobileIsRunning / MobileSetDebug undef found)"
+          fi
 
-          # Hard assertion: the extension binary must reference
-          # `OlcRTCMobile.framework` in its load commands. Without
-          # this line in `otool -L`, the linker did not pull in the
-          # framework — i.e. the extension binary silently shipped
-          # without the link edge we are trying to prove. The link
-          # edge is forced by `-Wl,-needed_framework,OlcRTCMobile`
-          # in the target's `OTHER_LDFLAGS` (see `project.yml`); if a
-          # future change removes that flag, this assertion fires.
+          echo
+          echo "--- nm (defined ObjC anchor symbol) ---"
+          # Diagnostic: confirm the C anchor function survived the
+          # link. Its name is the value passed to -Wl,-u in the
+          # extension target's OTHER_LDFLAGS, see project.yml.
+          anchor_def="$(nm "$APPEX/PacketTunnelProvider" 2>/dev/null | grep -E ' _OlcRTCExtensionGomobileLinkAnchor$' || true)"
+          if [ -n "$anchor_def" ]; then
+            echo "$anchor_def"
+          else
+            echo "(none — _OlcRTCExtensionGomobileLinkAnchor not defined in the extension binary)"
+          fi
+
+          echo
+          echo "--- Ld step for PacketTunnelProvider.appex (from xcodebuild log) ---"
+          # Print the actual clang link invocation so the OTHER_LDFLAGS
+          # contents land in this step's output, not buried in the
+          # build step. Best-effort: if the line shape ever changes,
+          # the rest of the assertions below still drive the verdict.
+          if [ -f build/xcodebuild.log ]; then
+            awk '
+              /^Ld .*PacketTunnelProvider\.appex\/PacketTunnelProvider normal/ { capture=1; print; next }
+              capture==1 && /^[[:space:]]/ { print; next }
+              capture==1 { capture=0 }
+            ' build/xcodebuild.log || true
+          else
+            echo "(xcodebuild.log not present)"
+          fi
+
+          echo
+          # Hard assertion 1: the extension binary must list
+          # `OlcRTCMobile.framework/OlcRTCMobile` in `otool -L`. If
+          # this is missing, there is no `LC_LOAD_DYLIB` for the
+          # framework and dyld would not bind any gomobile symbols at
+          # load time even if some were referenced — i.e. the link
+          # edge we are trying to prove does not exist.
           if ! otool -L "$APPEX/PacketTunnelProvider" \
               | grep -q "OlcRTCMobile.framework/OlcRTCMobile"; then
             echo "ERROR: extension binary does not reference OlcRTCMobile.framework in its load commands." >&2
-            echo "       Check OTHER_LDFLAGS for the target — expected -Wl,-needed_framework,OlcRTCMobile." >&2
+            echo "       Check OTHER_LDFLAGS for the target — expected the C anchor in" >&2
+            echo "       Sources/PacketTunnelProvider/GomobileExtensionLinkAnchor.m to" >&2
+            echo "       carry undefined references to MobileIsRunning / MobileSetDebug," >&2
+            echo "       kept alive by -Wl,-u,_OlcRTCExtensionGomobileLinkAnchor." >&2
             exit 1
           fi
 
-          # Diagnostic only: count of `Mobile`-prefixed undefined
-          # symbol references. With `-needed_framework`, the load
-          # command is kept regardless of whether any symbol actually
-          # references the framework's exports, so this number can
-          # legitimately be zero. We still print it because a NON-zero
-          # number is useful evidence that the Swift-side
-          # `GomobileExtensionProbe.touch()` reference also survived
-          # dead-stripping — and if Apple ever changes
-          # `-needed_framework` semantics, the count being zero will
-          # be the most useful debugging signal.
-          echo "(diagnostic) Mobile-prefixed undef count: $mobile_undef"
+          # Hard assertion 2: the extension binary must carry at
+          # least one of the gomobile symbol references that the C
+          # anchor (`Sources/PacketTunnelProvider/GomobileExtensionLinkAnchor.m`)
+          # makes — `_MobileIsRunning` or `_MobileSetDebug`. Without
+          # this, even a present `LC_LOAD_DYLIB` would be a paper
+          # trail with no actual call site, and v4's failure mode
+          # would silently recur on the next toolchain change.
+          if [ -z "$mobile_undefs" ]; then
+            echo "ERROR: extension binary has no undefined references to MobileIsRunning or MobileSetDebug." >&2
+            echo "       The C anchor in" >&2
+            echo "       Sources/PacketTunnelProvider/GomobileExtensionLinkAnchor.m" >&2
+            echo "       is supposed to call both. If clang built the .m file but the" >&2
+            echo "       linker dropped the function, check the matching -Wl,-u flag in" >&2
+            echo "       project.yml and __attribute__((used)) on the function." >&2
+            exit 1
+          fi
 
           echo
-          echo "OK: PacketTunnelProvider.appex compiled AND linked against OlcRTCMobile (Mobile-prefixed undef count: $mobile_undef)."
+          echo "OK: PacketTunnelProvider.appex links against OlcRTCMobile and carries Mobile* undef refs from the C anchor."
 
       - name: Probe summary
         if: always()

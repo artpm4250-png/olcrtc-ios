@@ -9,6 +9,91 @@ Date format: `YYYY-MM-DD`. Each entry should answer **what** changed and
 
 ---
 
+### 2026-05-29 — Probe v5: ObjC/C anchor + `-Wl,-u,_OlcRTCExtensionGomobileLinkAnchor`
+
+- v4's diagnosis (see entry directly below) was that the link
+  edge to `OlcRTCMobile` disappears because the Swift anchor
+  (`private let _gomobileLinkAnchor: Bool = GomobileExtensionProbe.touch()`)
+  is eliminated by `-O -whole-module-optimization` *before* the
+  linker ever sees a reference to `MobileIsRunning` /
+  `MobileSetDebug`. Linker-side flags (`-u`, `-needed_framework`)
+  cannot rescue references that never reach the linker. v5 fixes
+  the *probe*, not the linker — the anchor moves out of Swift's
+  reach.
+- New file:
+  `ios/OlcRTCClient/Sources/PacketTunnelProvider/GomobileExtensionLinkAnchor.m`.
+  Imports `<Foundation/Foundation.h>` and
+  `<OlcRTCMobile/OlcRTCMobile.h>`, defines a single C function:
+
+  ```objc
+  __attribute__((used))
+  void OlcRTCExtensionGomobileLinkAnchor(void) {
+      (void)MobileIsRunning();
+      MobileSetDebug(NO);
+  }
+  ```
+
+  `__attribute__((used))` keeps clang from removing the function
+  body as unused at the object-file level. Both calls are the
+  safest pair on the gomobile surface — pure status read +
+  configure-only flag flip — so the probe still does not start
+  any olcRTC runtime, does not open sockets, and is not invoked
+  from `PacketTunnelProvider.startTunnel` (which still fails
+  fast with `notWiredYet`).
+- `ios/OlcRTCClient/project.yml`, extension target's
+  `OTHER_LDFLAGS` becomes
+  `$(inherited) -lresolv -Wl,-needed_framework,OlcRTCMobile -Wl,-u,_OlcRTCExtensionGomobileLinkAnchor`.
+  `-Wl,-u,_OlcRTCExtensionGomobileLinkAnchor` tells ld to keep
+  the C anchor's symbol in the final binary regardless of who
+  references it; once that function is in the binary, its body
+  carries genuine undefined references to `_MobileIsRunning` and
+  `_MobileSetDebug`, which forces ld to keep the
+  `LC_LOAD_DYLIB` for `OlcRTCMobile`. The
+  `-Wl,-needed_framework,OlcRTCMobile` from v4 is kept as
+  belt-and-suspenders; with the C-side undefs present it is
+  functionally redundant, but its absence would make a
+  regression to v4 territory silent.
+- `APPLICATION_EXTENSION_API_ONLY = YES` remains set on the
+  extension target. Code signing stays disabled
+  (`CODE_SIGNING_ALLOWED = NO`, `CODE_SIGN_IDENTITY = ""`,
+  `CODE_SIGNING_REQUIRED = NO`). Entitlements stay detached.
+  `OlcRTCMobile.xcframework` dependency on the extension target
+  is unchanged (`embed: false, codeSign: false, link: true`).
+  The Swift-side `GomobileExtensionProbe.swift` and
+  `_gomobileLinkAnchor` stored property are kept as harmless
+  documentation landmarks — they no longer carry the link
+  guarantee, but removing them now would muddy the diff.
+- `.github/workflows/packet-tunnel-gomobile-probe.yml` confirm
+  step now:
+  - tees `xcodebuild` output to `build/xcodebuild.log` so the Ld
+    invocation can be quoted directly in the assertion step;
+  - prints the full `otool -L` output;
+  - prints `nm -u | grep -E 'Mobile(IsRunning|SetDebug)'`;
+  - prints the defined-symbol line for
+    `_OlcRTCExtensionGomobileLinkAnchor` from the extension
+    binary (diagnostic for whether the C anchor itself
+    survived);
+  - extracts and prints the `Ld …PacketTunnelProvider.appex…`
+    block from `build/xcodebuild.log` (best-effort);
+  - **hard-fails** if `otool -L` does not list
+    `OlcRTCMobile.framework/OlcRTCMobile`;
+  - **hard-fails** if `nm -u` produces no
+    `MobileIsRunning` / `MobileSetDebug` line. The v4-era
+    "Mobile-prefixed undef count is a diagnostic only" stance
+    is reverted — under the v5 strategy, those undefs are the
+    direct evidence that the link edge is real, so they must be
+    present.
+- Acceptance criterion (probe v5): the workflow runs green AND
+  the confirm step prints both
+  `Frameworks/OlcRTCMobile.framework/OlcRTCMobile` (in `otool -L`)
+  and at least one of `_MobileIsRunning` / `_MobileSetDebug` (in
+  `nm -u`). The extension still compiles cleanly under
+  `APPLICATION_EXTENSION_API_ONLY = YES` and code signing stays
+  disabled. No IPA, no app tests, no extension runtime, no Go
+  core changes.
+
+---
+
 ### 2026-05-29 — Probe v4 result: `-needed_framework` did **not** survive ld_prime + WMO
 
 - Run:
