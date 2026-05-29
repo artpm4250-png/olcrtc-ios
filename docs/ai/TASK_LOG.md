@@ -9,6 +9,146 @@ Date format: `YYYY-MM-DD`. Each entry should answer **what** changed and
 
 ---
 
+### 2026-05-29 — Probe v6: hard C relocation anchors + `optnone`
+
+- v5's diagnosis (entry directly below) was that ld_prime LTO +
+  `-Os` folded the v5 anchor body into a no-op: the calls to
+  `MobileIsRunning` (return cast to `(void)`) and
+  `MobileSetDebug(NO)` (void return) had no LTO-visible side
+  effect, so they were eliminated even though
+  `__attribute__((used))` kept the **symbol**.
+  `__attribute__((used))` protects the symbol, not the
+  statements inside the body. Linker-only and symbol-only
+  mitigations (`-Wl,-u`, `-needed_framework`,
+  `__attribute__((used))`) have been exhausted. v6 moves the
+  gomobile references out of the body's call instructions and
+  into Mach-O **data relocations** that LTO cannot fold.
+- File rewritten:
+  `ios/OlcRTCClient/Sources/PacketTunnelProvider/GomobileExtensionLinkAnchor.m`.
+  The new shape combines three independent guarantees, any one
+  of which would on its own keep the OlcRTCMobile link edge:
+
+  ```objc
+  typedef BOOL (*OlcRTCMobileIsRunningFn)(void);
+  typedef void (*OlcRTCMobileSetDebugFn)(BOOL);
+
+  __attribute__((used))
+  static volatile BOOL OlcRTCGomobileBoolSink = NO;
+
+  __attribute__((used))
+  static volatile OlcRTCMobileIsRunningFn OlcRTCGomobileIsRunningPtr = MobileIsRunning;
+
+  __attribute__((used))
+  static volatile OlcRTCMobileSetDebugFn OlcRTCGomobileSetDebugPtr = MobileSetDebug;
+
+  __attribute__((used, noinline, optnone))
+  void OlcRTCExtensionGomobileLinkAnchor(void) {
+      OlcRTCMobileIsRunningFn isRunning =
+          (OlcRTCMobileIsRunningFn)OlcRTCGomobileIsRunningPtr;
+      OlcRTCMobileSetDebugFn setDebug =
+          (OlcRTCMobileSetDebugFn)OlcRTCGomobileSetDebugPtr;
+      BOOL running = isRunning();
+      OlcRTCGomobileBoolSink = running;
+      setDebug(OlcRTCGomobileBoolSink);
+  }
+  ```
+
+  - **Guarantee 1 — data relocations.** The two
+    function-pointer initializers force clang to emit Mach-O
+    relocations against `_MobileIsRunning` and `_MobileSetDebug`
+    in the data segment. Those relocations are not call
+    instructions; LTO has no notion of "the result of this
+    pointer is unused" and cannot fold them away. ld must
+    resolve them against `OlcRTCMobile.framework`, which keeps
+    `LC_LOAD_DYLIB` for the framework regardless of whether
+    anything ever calls through the pointers.
+  - **Guarantee 2 — volatile observable behaviour.** Every read
+    and write to a `volatile`-qualified object is observable
+    behaviour under the C standard. Loading the function
+    pointers, calling through them, writing the result into
+    `OlcRTCGomobileBoolSink`, and reading it back to pass to
+    `setDebug` form a chain of observable accesses; the
+    optimizer cannot prove the chain is dead.
+  - **Guarantee 3 — `optnone` on the anchor.** clang accepts
+    `optnone` (since 3.5; Apple clang in Xcode 16.4 supports
+    it) to compile a function at -O0 regardless of the file's
+    optimization level. The attribute survives into LTO IR and
+    keeps the body's instructions intact.
+  - `__attribute__((used))` on each `static` variable prevents
+    the compiler from removing the variable itself even if no
+    code reads it. `-Wl,-u,_OlcRTCExtensionGomobileLinkAnchor`
+    in the extension target's `OTHER_LDFLAGS` keeps the anchor
+    function symbol in the final binary regardless of Swift
+    references.
+- `ios/OlcRTCClient/project.yml`. Extension target's
+  `OTHER_LDFLAGS` becomes
+  `$(inherited) -lresolv -Wl,-u,_OlcRTCExtensionGomobileLinkAnchor`.
+  `-Wl,-needed_framework,OlcRTCMobile` is **removed** for v6:
+  v4 already proved `-needed_framework` loses to the trailing
+  `-framework OlcRTCMobile` injected by the dependency on this
+  toolchain, and v6 wants the verdict to come purely from the
+  C-side relocation anchors and the implicit `-framework
+  OlcRTCMobile` from the dependency. With `-needed_framework`
+  in the mix a green v6 would have been ambiguous about which
+  layer carried the link edge; without it, a green v6 means
+  the C anchors did the work.
+- `APPLICATION_EXTENSION_API_ONLY = YES` remains set on the
+  extension target. Code signing stays disabled. Entitlements
+  stay detached. `OlcRTCMobile.xcframework` dependency on the
+  extension target stays `embed: false, codeSign: false,
+  link: true`. `PacketTunnelProvider.startTunnel` still fails
+  fast with `notWiredYet`. The Swift-side
+  `GomobileExtensionProbe.swift` and `_gomobileLinkAnchor`
+  stored property are kept as harmless documentation
+  landmarks; v6 does not depend on them.
+- `.github/workflows/packet-tunnel-gomobile-probe.yml`
+  confirm step is restructured into four numbered sections so
+  a future failure points at the exact layer that ate the
+  references:
+  - **A. Final binary diagnostics** — full `otool -L`,
+    `nm -u | grep Mobile(IsRunning|SetDebug)`,
+    `nm | grep OlcRTCExtensionGomobileLinkAnchor|OlcRTCGomobile`.
+  - **B. Intermediate object diagnostics** — walks every `.o`
+    under `build/DerivedData/**/PacketTunnelProvider.build/**`
+    and prints both `nm` and `nm -u` lines matching
+    `Mobile(IsRunning|SetDebug)|OlcRTCExtensionGomobileLinkAnchor|OlcRTCGomobile`,
+    plus a final `obj_count` and `obj_has_mobile_refs`
+    aggregate.
+  - **C. Linker command** — the captured Ld step from
+    `build/xcodebuild.log`, unchanged from v5.
+  - **D. Result classification** — combines the signals
+    above into one of:
+    - `PASS` — `otool -L` lists OlcRTCMobile **and** final
+      binary has Mobile* undef refs;
+    - `PASS-WEAK` — `otool -L` lists OlcRTCMobile but no
+      final-binary Mobile* undef (the link edge is real but
+      the body's calls were still folded; flagged because v6
+      is supposed to keep both);
+    - `FAIL-STRIPPED-BEFORE-LINK` — no Mobile* undef in any
+      `.o` (references died upstream of ld);
+    - `FAIL-STRIPPED-AFTER-LINK` — `.o` files have Mobile*
+      undef but final binary has no OlcRTCMobile load command
+      (ld / LTO native-code stage stripped them);
+    - `FAIL-OTHER` — none of the above; see the printed
+      signals.
+  `FAIL-COMPILE` and `FAIL-LINK` are not emitted by this step
+  — those would have aborted the previous (build) step with a
+  clang or ld diagnostic. The remaining classes split exactly
+  the live failure space.
+- Acceptance criterion (probe v6): the workflow runs green
+  AND the `D. Result classification` line reads `PASS`
+  (not `PASS-WEAK`) — `otool -L` lists
+  `Frameworks/OlcRTCMobile.framework/OlcRTCMobile`, the final
+  binary's `nm -u` shows at least one of
+  `_MobileIsRunning` / `_MobileSetDebug`, and at least one
+  intermediate `.o` already carries a Mobile* undef. The
+  extension still compiles cleanly under
+  `APPLICATION_EXTENSION_API_ONLY = YES` and code signing
+  stays disabled. No IPA, no app tests, no extension runtime,
+  no Go core changes.
+
+---
+
 ### 2026-05-29 — Probe v5 result: C anchor symbol survived, but its `Mobile*` calls were stripped
 
 - Run:

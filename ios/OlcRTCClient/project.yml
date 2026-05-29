@@ -118,37 +118,40 @@ targets:
         # reason; mirror it here so the extension's linker resolves the
         # same symbols.
         #
-        # `-needed_framework OlcRTCMobile` is ld(1)'s explicit "keep
-        # this framework's load command even if dead-stripping finds
-        # no surviving references" directive. Probe v2 showed that
-        # adding a Swift-side reference (a stored property calling
-        # `MobileIsRunning`) is not enough on `iphoneos` Release:
-        # whole-module LTO eliminates the unused property and clang's
-        # `-dead_strip` then drops the `LC_LOAD_DYLIB` for
-        # OlcRTCMobile, so the extension binary ships with no
-        # OlcRTCMobile link edge — silently invalidating the probe.
-        # Probe v3 tried `-u,_MobileIsRunning` (force the symbol to be
-        # undefined) but ld64 still elided the framework when
-        # `-dead_strip` ran. Probe v4 confirmed `-needed_framework`
-        # alone is also insufficient on Xcode 16.4's ld_prime when
-        # the dependency-injected trailing `-framework OlcRTCMobile`
-        # shadows it and the Swift-side reference does not survive
-        # WMO at all. See `docs/ai/TASK_LOG.md` —
-        # `2026-05-29 — Probe v4 result`.
+        # `-Wl,-u,_OlcRTCExtensionGomobileLinkAnchor` tells ld to keep
+        # the C anchor symbol defined in
+        # `Sources/PacketTunnelProvider/GomobileExtensionLinkAnchor.m`
+        # in the final binary regardless of whether anything in Swift
+        # refers to it. The anchor file itself carries the actual
+        # `OlcRTCMobile` link edge: it stores `MobileIsRunning` and
+        # `MobileSetDebug` into `static volatile` function-pointer
+        # variables annotated with `__attribute__((used))`, which
+        # forces clang to emit Mach-O relocations against
+        # `_MobileIsRunning` and `_MobileSetDebug` and forces ld to
+        # resolve them — see the file header for the full chain.
         #
-        # Probe v5 fixes the *probe*, not the linker: the anchor moves
-        # from Swift to C
-        # (`Sources/PacketTunnelProvider/GomobileExtensionLinkAnchor.m`)
-        # so it is opaque to Swift WMO. clang's
-        # `__attribute__((used))` keeps the function body, and
-        # `-Wl,-u,_OlcRTCExtensionGomobileLinkAnchor` keeps its symbol
-        # in the final binary so its calls to `MobileIsRunning` and
-        # `MobileSetDebug` survive as real undefined references.
-        # `-Wl,-needed_framework,OlcRTCMobile` is kept as
-        # belt-and-suspenders: with the C-side undefs present it is
-        # functionally redundant, but its absence would make a
-        # regression to probe-v4 territory silent.
-        OTHER_LDFLAGS: $(inherited) -lresolv -Wl,-needed_framework,OlcRTCMobile -Wl,-u,_OlcRTCExtensionGomobileLinkAnchor
+        # History (see `docs/ai/TASK_LOG.md` —
+        # `2026-05-29 — Probe v{2,3,4,5} result`):
+        #   v2 used a Swift `private let` calling
+        #   `MobileIsRunning` — eliminated by Swift WMO.
+        #   v3 added `-Wl,-u,_MobileIsRunning` —
+        #   ld dead-stripped the framework anyway.
+        #   v4 added `-Wl,-needed_framework,OlcRTCMobile` —
+        #   ld_prime allowed the trailing `-framework
+        #   OlcRTCMobile` (XcodeGen-injected) to shadow the
+        #   `needed` flag.
+        #   v5 moved the anchor to a C function with
+        #   `__attribute__((used))` — the symbol survived but
+        #   LTO + `-Os` folded its body, taking the
+        #   `MobileIsRunning` / `MobileSetDebug` calls with it.
+        # v6 (this configuration) makes the references survive LTO
+        # by anchoring them in **data** (function-pointer
+        # initializers) instead of in calls. `-needed_framework`
+        # is intentionally not kept here: a v6 PASS must come
+        # from real surviving relocations and the implicit
+        # `-framework OlcRTCMobile` from the dependency, not from
+        # a "keep load command anyway" override.
+        OTHER_LDFLAGS: $(inherited) -lresolv -Wl,-u,_OlcRTCExtensionGomobileLinkAnchor
     dependencies:
       # `OlcRTCMobile.xcframework` linked into the extension target as a
       # COMPILE / LINK probe only (branch
