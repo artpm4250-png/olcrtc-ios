@@ -9,6 +9,108 @@ Date format: `YYYY-MM-DD`. Each entry should answer **what** changed and
 
 ---
 
+### 2026-05-29 — Probe v10: flip the extension's `OlcRTCMobile.xcframework` to `embed: true`
+
+- v9's diagnosis (entry below) was that ld_prime's `-dead_strip`
+  on Xcode 16.4 / iOS 18.5 SDK is willing to drop `LC_LOAD_DYLIB`
+  for a link-only dynamic framework even when the call site is
+  inside `PacketTunnelProvider.startTunnel` — the override of a
+  virtual method on the extension's `NSExtensionPrincipalClass`.
+  ld treats `_NSExtensionMain` (defined in Foundation) as the
+  only true root and the principal class as reachable only via
+  Objective-C runtime string dispatch it can't statically prove.
+  Every "anchor" strategy from v2–v9 failed; the remaining lever
+  named at the end of v9 was option (c): switch the extension's
+  framework dependency to `embed: true`.
+- File change (single line in disposition, but worth recording
+  for the diagnostic chain):
+  - `ios/OlcRTCClient/project.yml` — for the
+    `PacketTunnelProvider` target's
+    `Frameworks/OlcRTCMobile.xcframework` dependency, flipped
+    `embed: false` → `embed: true`. `codeSign: false` and
+    `link: true` are kept. The comment block above the
+    dependency was rewritten to record why and to point at
+    this entry.
+  - No source files changed.
+    `Sources/PacketTunnelProvider/PacketTunnelProvider.swift`
+    still calls `GomobileExtensionProbe.touchNonStartingAPI()`
+    inside the `#if canImport(OlcRTCMobile)` block in
+    `startTunnel`, then returns `StubError.notWiredYet`.
+    `GomobileExtensionProbe.swift` is unchanged.
+    `APPLICATION_EXTENSION_API_ONLY: YES`, `LLVM_LTO: NO`,
+    `OTHER_LDFLAGS: $(inherited) -lresolv`, signing disabled,
+    entitlements detached — all unchanged.
+- Workflow change:
+  `.github/workflows/packet-tunnel-gomobile-probe.yml` —
+  rewrote the "Confirm" step's diagnostics and classifier for
+  the v10 question. Sections:
+  - **A. Final extension binary diagnostics.** Still prints
+    `otool -L`, `otool -l | grep -A2 LC_LOAD_DYLIB`, and
+    `nm -u | grep Mobile(IsRunning|SetDebug)`. Still important
+    as secondary signal — if `embed: true` does keep the load
+    command, that's worth knowing (`PASS-LINKED-AND-EMBEDDED`).
+  - **B. Extension bundle structure.** New. Lists
+    `find $APPEX -maxdepth 4 -print | sort` so a future
+    regression is obvious. Asserts presence of
+    `$APPEX/Frameworks/OlcRTCMobile.framework/OlcRTCMobile`
+    and `$APPEX/Frameworks/OlcRTCMobile.framework/Info.plist`.
+    Prints `du -sh` of the embedded framework as the
+    duplication-cost signal the v8 diagnosis warned about
+    (~33 MB).
+  - **C. Main app bundle (if built).** Lists
+    `find $APP -maxdepth 4 -print | sort`, confirms
+    `$APP/PlugIns/PacketTunnelProvider.appex` is present, and
+    runs the `.xcframework` leak guard
+    (`find $APP $APPEX -name '*.xcframework' -type d`). Apple
+    rejects `.xcframework` directories inside a device bundle;
+    the embed phase must copy the iphoneos `.framework` slice.
+  - **D. Ld step + LTO state.** Same as v9 — kept for
+    continuity since the linker invocation is still useful
+    context.
+  - **E. Classification.** v10 retires v9's
+    `PASS` / `PASS-WEAK` / `FAIL-STRIPPED-BEFORE-LINK` /
+    `FAIL-STRIPPED-AFTER-LINK`. The v10 classes are
+    `PASS-EMBEDDED` (framework present in `.appex` but
+    `otool -L` still has no load command — fine because dyld
+    will resolve the embedded copy at runtime),
+    `PASS-LINKED-AND-EMBEDDED` (both), `FAIL-XCFRAMEWORK-LEAK`
+    (`.xcframework` directory leaked into bundle),
+    `FAIL-NOT-EMBEDDED` (build succeeded but the framework is
+    not in the `.appex/Frameworks/`),
+    `FAIL-API-ONLY-OFF` (the v9 guard, kept). A build failure
+    in the preceding xcodebuild step fails the workflow before
+    the classifier runs — that's reported as a plain "build
+    failed" step.
+- What we are testing in v10. The primary question is
+  structural: does XcodeGen, given `embed: true` on an
+  `app-extension` target whose dependency is an
+  `.xcframework`, actually emit a Copy Files (Embed
+  Frameworks) build phase that copies the iphoneos
+  `.framework` slice into `PacketTunnelProvider.appex/
+  Frameworks/`? Two failure modes to watch for:
+  1. **`.xcframework` leak**: XcodeGen / Xcode copies the
+     literal wrapper (with `ios-arm64/`, `ios-arm64-simulator/`
+     subdirs) instead of the resolved slice. Apple's install
+     path rejects this; we treat it as a hard fail.
+  2. **Code-sign mismatch** on the embedded framework in the
+     unsigned CI path. `codeSign: false` on the dependency
+     should prevent Xcode from running the framework through
+     `codesign` after copy, but it's possible XcodeGen emits a
+     phase that asks for signing anyway and the unsigned build
+     blocks it.
+- Hard scope reminder. No VPN runtime in v10.
+  `PacketTunnelProvider.startTunnel` still returns
+  `StubError.notWiredYet` immediately after the
+  `MobileSetDebug(false)` / `MobileIsRunning()` probe call. No
+  `MobileStart*`, no `MobileCheck`, no `MobilePing`, no
+  sockets, no `NEPacketTunnelNetworkSettings`,
+  no `NEPacketTunnelFlow`. Signing stays disabled. Entitlements
+  stay detached. The unsigned CI build still does not produce
+  an installable VPN — see
+  [`docs/ai/DECISIONS.md`](DECISIONS.md) ADR-0008.
+
+---
+
 ### 2026-05-29 — Probe v9 result: classification = `FAIL-STRIPPED-AFTER-LINK` (real `startTunnel` entrypoint reference stripped too)
 
 - Run:

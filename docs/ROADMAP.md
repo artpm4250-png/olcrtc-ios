@@ -143,10 +143,18 @@ extension memory budget.
 
 **Tasks:**
 - [x] Add `Frameworks/OlcRTCMobile.xcframework` as a framework
-      dependency on the extension target in `project.yml`
-      (`embed: false, codeSign: false, link: true` — the host app
-      already owns the embedded copy; the extension only needs the
-      link edge for symbol resolution). Branch
+      dependency on the extension target in `project.yml`. Probes
+      v2–v9 ran with `embed: false, codeSign: false, link: true`
+      (the host app already owns the embedded copy; the extension
+      only needs the link edge for symbol resolution), but every
+      one of them ended with ld_prime's `-dead_strip` removing
+      `LC_LOAD_DYLIB` for `OlcRTCMobile` from the final extension
+      binary regardless of which anchor strategy held the symbol
+      reference. Probe v10 flips to `embed: true, codeSign: false,
+      link: true` so XcodeGen emits a Copy Files (Embed
+      Frameworks) phase that copies the iphoneos `.framework`
+      slice into `PacketTunnelProvider.appex/Frameworks/`. See
+      `docs/ai/TASK_LOG.md` for the v2–v10 probe chain. Branch
       `packet-tunnel-gomobile-probe`.
 - [x] Mirror `OTHER_LDFLAGS: $(inherited) -lresolv` from the host
       app onto the extension target (the Go runtime needs BSD
@@ -177,10 +185,16 @@ extension memory budget.
         `MobileWaitReady(timeoutMillis:)` resolves;
       - logs to a shared App Group log file (so the main app's
         Logs tab can mirror it).
-- [ ] Smoke test the binary size of the signed `.ipa` (the Go
-      runtime may double-link if the framework is embedded into
-      both the app and the extension; if so, switch the extension
-      to a `embed: false` link from the host).
+- [ ] Smoke test the binary size of the signed `.ipa`. Probe v10
+      moved the extension to `embed: true` (see
+      `docs/ai/TASK_LOG.md` and Milestone 3 task 1 above), which
+      duplicates `OlcRTCMobile.framework` (~33 MB) into both
+      `OlcRTCClient.app/Frameworks/` and
+      `OlcRTCClient.app/PlugIns/PacketTunnelProvider.appex/Frameworks/`.
+      That duplication is acceptable for the probe but may need
+      optimization (shared single copy via Copy Files override, or
+      a follow-up that drops the host-app embed once the extension
+      owns the runtime).
 - [ ] Stress test the extension memory budget (~15 MB on older
       devices, ~50 MB on newer). Capture peak RSS in `Logs`.
 

@@ -224,8 +224,19 @@ properties, `-Wl,-u` linker forces, `-Wl,-needed_framework`, C
 functions with `__attribute__((used, noinline, optnone))`, static
 function-pointer initializers, `__attribute__((constructor))` —
 and every one was stripped by ld_prime's regular dead-strip on
-Xcode 16.4 / iOS 18.5 SDK. v9 abandons the anchor approach
-entirely and uses the real `startTunnel` entrypoint instead.
+Xcode 16.4 / iOS 18.5 SDK. v9 moved the reference into the real
+`PacketTunnelProvider.startTunnel` entrypoint; ld still stripped
+it because the principal class is only reachable via the
+Objective-C runtime's string-dispatched `NSExtensionMain` path.
+v10 abandons the link-only model and flips the extension's
+`OlcRTCMobile.xcframework` dependency to `embed: true`, so
+XcodeGen emits a Copy Files (Embed Frameworks) build phase that
+copies the `.framework` into
+`PacketTunnelProvider.appex/Frameworks/`. The `.ipa` therefore
+carries two copies of the Go runtime (~33 MB each — one for the
+host app, one for the extension); the v10 probe accepts that
+duplication as the cost of getting the framework structurally
+embedded in the extension.
 
 Known risks the probe is intended to surface (record findings here
 once a CI run is available):

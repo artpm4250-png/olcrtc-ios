@@ -140,30 +140,50 @@ targets:
         # therefore not strippable.
         OTHER_LDFLAGS: $(inherited) -lresolv
     dependencies:
-      # `OlcRTCMobile.xcframework` linked into the extension target as a
-      # COMPILE / LINK probe only (branch
-      # `packet-tunnel-gomobile-probe`, see ADR-0006 and Milestone 3 in
-      # `docs/ROADMAP.md`). `embed: false` so the framework is NOT
-      # double-embedded — the host app already owns the bundled binary
-      # under its own `Frameworks/` and the extension uses the same
-      # copy at runtime via the bundle search path. `link: true` is
-      # required to make the symbols available to the extension's
-      # compile/link step.
+      # `OlcRTCMobile.xcframework` embedded into the extension target
+      # as of probe v10 (branch `packet-tunnel-gomobile-probe`,
+      # Milestone 3 in `docs/ROADMAP.md`). Probes v2–v9 confirmed
+      # that ld_prime's `-dead_strip` will drop `LC_LOAD_DYLIB` for
+      # `OlcRTCMobile` whenever the framework is link-only and
+      # nothing reachable from `_NSExtensionMain` references it —
+      # *every* anchor strategy failed, including the v9 reference
+      # from inside `PacketTunnelProvider.startTunnel`. v10 flips
+      # `embed: true` so XcodeGen emits a Copy Files (Embed
+      # Frameworks) build phase whose output is
+      # `Frameworks/OlcRTCMobile.framework` inside the `.appex`.
+      # That phase is what we are probing — Xcode validates the
+      # bundle structure at that step, so a successful build with
+      # the framework present in the `.appex` proves the extension
+      # can structurally host the gomobile framework under unsigned
+      # CI.
+      #
+      # `codeSign: false` keeps Xcode from trying to re-sign the
+      # framework on copy — required because the unsigned CI path
+      # has `CODE_SIGNING_ALLOWED=NO`. `link: true` keeps the
+      # symbols available to the extension's compile/link step.
+      #
+      # The host app also embeds the same framework (see the
+      # OlcRTCClient target's dependency), so the `.ipa` will
+      # contain two copies of the Go runtime — one in
+      # `OlcRTCClient.app/Frameworks/` and one in
+      # `OlcRTCClient.app/PlugIns/PacketTunnelProvider.appex/Frameworks/`.
+      # This duplication is acceptable for the probe (~33 MB
+      # framework body) and is what the v10 workflow asserts; a
+      # future optimization could move both targets to a single
+      # shared copy via `EMBED_FRAMEWORKS_IN_PLUGINS=NO` or a
+      # custom Copy Files phase, but that is out of scope here.
       #
       # We deliberately do NOT run any olcRTC network code from the
       # extension yet (no MobileStart / MobileStartWithTransport /
-      # MobileCheck / MobilePing call from the extension's startTunnel).
-      # Probe v9 calls `GomobileExtensionProbe.touchNonStartingAPI()`
-      # from `PacketTunnelProvider.startTunnel`, which references
-      # `MobileIsRunning` and `MobileSetDebug(false)` — both
-      # configure / read-only — so the symbols get linked from a
-      # real runtime entrypoint. That proves the extension target
-      # can link against OlcRTCMobile under
-      # `APPLICATION_EXTENSION_API_ONLY = YES`. Real `startTunnel`
-      # wiring stays gated on Milestone 4 (signed build + real VPN
-      # runtime).
+      # MobileCheck / MobilePing call from the extension's
+      # startTunnel). Probe v9's
+      # `GomobileExtensionProbe.touchNonStartingAPI()` call from
+      # `startTunnel` stays in place — it references
+      # `MobileIsRunning` and `MobileSetDebug(false)`, both
+      # configure / read-only. Real `startTunnel` wiring stays
+      # gated on Milestone 4 (signed build + real VPN runtime).
       - framework: Frameworks/OlcRTCMobile.xcframework
-        embed: false
+        embed: true
         codeSign: false
         link: true
   OlcRTCClientTests:
