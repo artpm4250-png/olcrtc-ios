@@ -300,3 +300,117 @@ Status values: `Accepted`, `Superseded by ADR-NNN`, `Proposed`.
     2. Here: `git -C third_party/olcrtc fetch && git -C third_party/olcrtc checkout <sha>`,
        then commit the updated submodule pointer.
     3. Re-run gomobile bind in CI.
+
+---
+
+## ADR-0013 — `OlcRTCMobile` is a static framework wrapper; the `PacketTunnelProvider` extension links it statically (no embed)
+
+- **Status:** Accepted
+- **Context:** `gomobile bind -target=ios ./mobile` produces
+  `OlcRTCMobile.xcframework` whose per-slice
+  `<slice>/OlcRTCMobile.framework/OlcRTCMobile` binary is a
+  `current ar archive` — i.e. a `.a`-style **static archive**
+  wrapped in a framework directory, not a Mach-O dylib. This is
+  gomobile's documented iOS output mode.
+  - Probes v2–v9 on branch `packet-tunnel-gomobile-probe` ran the
+    extension with the framework as a link-only dependency
+    (`embed: false / link: true / codeSign: false`) and tried to
+    survive ld_prime's `-dead_strip` via Swift stored properties,
+    `-Wl,-u <symbol>`, `-Wl,-needed_framework`, C constructor
+    functions, and finally a real `startTunnel` reference. Every
+    one of those was stripped from the final extension binary.
+  - Probe v10 flipped the extension to `embed: true`. The build
+    structurally produced
+    `PacketTunnelProvider.appex/Frameworks/OlcRTCMobile.framework`,
+    but xcodebuild's embed phase ran
+    `builtin-copy -remove-static-executable` against the source
+    and emitted `note: Injecting stub binary into codeless
+    framework (in target 'PacketTunnelProvider' …)`. The same
+    happened for the host app. Both embedded copies ended up as
+    ~40 KB codeless dylib stubs with no Mobile symbols.
+  - Probe v11 (run
+    [26633894897](https://github.com/artpm4250-png/olcrtc-ios/actions/runs/26633894897))
+    diagnosed the cause: `embed: true` cannot ship a static
+    framework, because Xcode's documented embed-phase behaviour
+    against a static framework is exactly to strip the static
+    executable and replace it with a codeless stub. The host
+    app already works because the static archive is **linked**
+    into the app's main executable directly — the codeless stub
+    framework next to it is inert.
+  - Probe v12 (run
+    [26634679085](https://github.com/artpm4250-png/olcrtc-ios/actions/runs/26634679085),
+    classification `PASS-STATIC-LINKED`) acted on that finding:
+    revert the extension to `embed: false / link: true /
+    codeSign: false` and force-load the device slice's static
+    archive into the extension executable. The final
+    `PacketTunnelProvider` binary is a 36 MB `Mach-O 64-bit
+    executable arm64` that carries every gomobile `Mobile*`
+    export (`MobileStart`, `MobileStartWithTransport`,
+    `MobileIsRunning`, `MobileSetDebug`, `MobileCheck`,
+    `MobilePing`); `nm -u` reports no undefined `Mobile*`
+    references; the `.appex/Frameworks/` directory contains no
+    `OlcRTCMobile.framework`, and no `.xcframework` leaks into
+    the `.app`. `APPLICATION_EXTENSION_API_ONLY = YES` remains
+    enabled.
+- **Decision:**
+  1. **`OlcRTCMobile.xcframework` is treated as a static
+     framework wrapper.** No iOS target embeds it as a dynamic
+     framework. If a target needs the Go runtime, it links the
+     archive into its own executable.
+  2. **`PacketTunnelProvider` extension uses
+     `embed: false / link: true / codeSign: false`** for the
+     `Frameworks/OlcRTCMobile.xcframework` dependency in
+     `project.yml`. The extension's `OTHER_LDFLAGS` carries
+     `$(inherited) -lresolv -force_load
+     $(SRCROOT)/Frameworks/OlcRTCMobile.xcframework/ios-arm64/OlcRTCMobile.framework/OlcRTCMobile`.
+     `-force_load` is scoped to that one archive; we deliberately
+     do not use `-all_load`.
+  3. **`-lresolv` stays on every target that links
+     `OlcRTCMobile`.** The Go runtime references the BSD resolver
+     symbols `_res_9_n{init,close,search}`, which live in
+     `libresolv.tbd` and are not linked by default on iOS.
+  4. **`APPLICATION_EXTENSION_API_ONLY = YES` stays enabled on
+     `PacketTunnelProvider`.** Any extension-unsafe symbol the
+     gomobile runtime might transitively need surfaces at
+     compile/link time, not at install-or-runtime.
+  5. **Code signing and entitlements stay separate.** ADR-0008
+     and the unsigned CI build path are unchanged. The
+     `.entitlements` files remain in the repo as a
+     future-signing reference, detached from the build until a
+     signing identity is configured.
+- **Consequences:**
+  - The `.appex` executable is large — ~36 MB in probe v12,
+    because the Go runtime's object files are now inside it.
+    Combined with the host app's existing setup, the final
+    `.ipa` will carry the runtime in the app's main executable
+    AND in the appex's main executable until the host app is
+    cleaned up the same way. That duplication is acceptable for
+    Milestone 3 / Milestone 4 work; revisit before any
+    App-Store-style size budget applies.
+  - `PacketTunnelProvider.appex/Frameworks/OlcRTCMobile.framework`
+    must NOT exist after a clean build. The probe workflow
+    asserts this; future build pipelines should keep the same
+    assertion (or at minimum not regress it).
+  - The host app's
+    `OlcRTCClient.app/Frameworks/OlcRTCMobile.framework` is
+    still a codeless stub (~40 KB) because the host app's
+    dependency is still `embed: true`. v12 deliberately does
+    not change the host app's shape — the stub is inert
+    (nothing dyld-loads it) and removing it is a separate
+    follow-up. A future ROADMAP item drops the host-app
+    `embed: true` and lets the static archive's link into the
+    main app binary stand on its own.
+  - Future `PacketTunnelProvider` runtime work (the
+    `packet-tunnel-runtime-skeleton` branch, see
+    `docs/ROADMAP.md`) calls gomobile APIs from the extension
+    directly via the linked-in static archive — there is no
+    framework-loading step at runtime, no `dlopen`, no
+    `Bundle(forClass:)` indirection. `import OlcRTCMobile`
+    resolves through the framework's `Modules/` exposed by the
+    `link: true` dependency.
+  - This decision does not authorize any VPN runtime,
+    `MobileStart*`, `MobileCheck`, `MobilePing`, sockets,
+    `NEPacketTunnelNetworkSettings`, or `NEPacketTunnelFlow`
+    plumbing in the extension. Those land in their own
+    milestones with their own ADRs.
+

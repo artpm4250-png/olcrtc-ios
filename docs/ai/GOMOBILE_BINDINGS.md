@@ -23,6 +23,56 @@ symbol.
 
 ---
 
+## 0. Linking model — static, not dynamic
+
+Locked in by [ADR-0013](DECISIONS.md). All targets that link
+`OlcRTCMobile` must follow this:
+
+- **`gomobile bind -target=ios` produces a static framework
+  wrapper.** Per-slice
+  `<slice>/OlcRTCMobile.framework/OlcRTCMobile` is a `current ar
+  archive` (a `.a`-style static archive inside a framework
+  directory), **not** a Mach-O dylib. Probe v11
+  ([run 26633894897](https://github.com/artpm4250-png/olcrtc-ios/actions/runs/26633894897))
+  proved this for both `ios-arm64/` and
+  `ios-arm64_x86_64-simulator/`.
+- **Targets statically link the archive into their own
+  executable.** The host app does this implicitly via XcodeGen's
+  default link path; `PacketTunnelProvider` does it explicitly
+  via a `-force_load <archive-path>` entry in `OTHER_LDFLAGS`
+  (see below).
+- **Do not treat `OlcRTCMobile.xcframework` as a dynamic embedded
+  framework.** `embed: true` on a static framework triggers
+  Xcode's `builtin-copy -remove-static-executable` plus
+  `note: Injecting stub binary into codeless framework`,
+  producing a ~40 KB codeless dylib stub with no Mobile symbols
+  at runtime — confirmed by probe v10. The stub is inert
+  (nothing dyld-loads it), but it carries no Go runtime, so
+  *embedding* is never the right way to deliver Mobile symbols.
+- **`-lresolv` is required** on every target that links
+  `OlcRTCMobile`. The Go runtime references the BSD resolver
+  symbols `_res_9_n{init,close,search}`, which live in
+  `libresolv.tbd` and are not linked by default on iOS.
+- **`PacketTunnelProvider` requires `-force_load <archive-path>`**
+  in `OTHER_LDFLAGS`. The static archive's object files are
+  otherwise candidates for `ld_prime` dead-stripping (probes
+  v2–v10 confirmed this in detail). Force-loading scopes the
+  override to one archive — we deliberately do **not** use
+  `-all_load`. The current path is
+  `$(SRCROOT)/Frameworks/OlcRTCMobile.xcframework/ios-arm64/OlcRTCMobile.framework/OlcRTCMobile`,
+  resolved via XcodeGen's `$(SRCROOT) = ios/OlcRTCClient`.
+- **Probe v12 acceptance**
+  ([run 26634679085](https://github.com/artpm4250-png/olcrtc-ios/actions/runs/26634679085),
+  classification `PASS-STATIC-LINKED`): the final
+  `PacketTunnelProvider` `.appex` executable is a 36 MB
+  `Mach-O 64-bit executable arm64` carrying every gomobile
+  `Mobile*` export with no undefined references and no embedded
+  `OlcRTCMobile.framework` directory inside `.appex/Frameworks/`.
+- **`APPLICATION_EXTENSION_API_ONLY = YES`** stays enabled on
+  the extension; the static-link strategy does not relax this.
+
+---
+
 ## 1. Framework + module + import names
 
 Discovered from workflow run

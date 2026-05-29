@@ -9,6 +9,68 @@ Date format: `YYYY-MM-DD`. Each entry should answer **what** changed and
 
 ---
 
+### 2026-05-29 — Probe v12 result: classification = `PASS-STATIC-LINKED`; static-link architecture accepted as ADR-0013
+
+- Run:
+  [`Packet Tunnel Gomobile Probe` 26634679085](https://github.com/artpm4250-png/olcrtc-ios/actions/runs/26634679085)
+  on commit
+  [`6d180e7`](https://github.com/artpm4250-png/olcrtc-ios/commit/6d180e7),
+  branch `packet-tunnel-gomobile-probe`. Workflow conclusion:
+  success.
+- Final extension binary
+  (`build/DerivedData/Build/Products/Release-iphoneos/OlcRTCClient.app/PlugIns/PacketTunnelProvider.appex/PacketTunnelProvider`):
+  `Mach-O 64-bit executable arm64`, ~36 MB. `nm -gU` carries
+  every gomobile-bound `Mobile*` export
+  (`MobileStart`, `MobileStartWithTransport`,
+  `MobileIsRunning`, `MobileSetDebug`, `MobileCheck`,
+  `MobilePing`); `nm -u` reports no undefined `Mobile*`
+  references; the `.appex/Frameworks/` directory has no
+  `OlcRTCMobile.framework` directory; no `.xcframework` leaks
+  into the `.app`. `APPLICATION_EXTENSION_API_ONLY = YES`
+  remains in `project.yml`. Artifact:
+  `packet-tunnel-gomobile-probe-v12-report` —
+  `summary.md`, `source-archive.txt`, `appex-binary.txt`,
+  `link-phase-log.txt`, plus the raw `xcodebuild.log`.
+- Architecture lock-in: the v12 finding is now recorded as
+  [ADR-0013](DECISIONS.md). gomobile's
+  `OlcRTCMobile.xcframework` is treated as a static framework
+  wrapper everywhere; the extension uses
+  `embed: false / link: true / codeSign: false` plus
+  `-force_load
+  $(SRCROOT)/Frameworks/OlcRTCMobile.xcframework/ios-arm64/OlcRTCMobile.framework/OlcRTCMobile`
+  in `OTHER_LDFLAGS`; `-lresolv` stays on every target that
+  links `OlcRTCMobile`; `APPLICATION_EXTENSION_API_ONLY = YES`
+  stays enabled. Code signing and entitlements stay separate
+  (ADR-0008).
+- Docs touched in this consolidation step (no source / no
+  workflow changes): `docs/ai/DECISIONS.md` (new ADR-0013),
+  `docs/ROADMAP.md` (Milestone 3 build/link probe marked
+  complete; new Milestone 3.5 added),
+  `docs/RELEASE_CHECKLIST.md` (new §5 "PacketTunnelProvider
+  gomobile feasibility" + renumbered later sections),
+  `docs/ai/GOMOBILE_BINDINGS.md` (new §0 "Linking model —
+  static, not dynamic"), and this entry.
+- **Next recommended branch:** `packet-tunnel-runtime-skeleton`
+  (Milestone 3.5 in `docs/ROADMAP.md`). Wire the lifecycle
+  skeleton between the host app and the extension *without*
+  starting any olcRTC network runtime — shared config surface,
+  `startTunnel` reads/validates/sanitized-logs the profile and
+  returns `notWiredYet`, `stopTunnel` cleans up, sanitized
+  extension logs flow into the App Group for the main app's
+  Logs tab. Real `MobileStart*` / `MobileCheck` / `MobilePing`
+  / `NEPacketTunnelNetworkSettings` /
+  `NEPacketTunnelFlow` plumbing remains gated on Milestone 4
+  + signing.
+- Hard scope reminder. v12 is build-and-link only. The probe
+  call in `startTunnel` is still only `MobileSetDebug(false)`
+  and `MobileIsRunning()`; `startTunnel` then returns
+  `StubError.notWiredYet`. No `MobileStart*`, no `MobileCheck`,
+  no `MobilePing`, no sockets, no `NEPacketTunnelNetworkSettings`,
+  no `NEPacketTunnelFlow`. No Go-core changes, no signing, no
+  entitlements, no claim that VPN works — see ADR-0008.
+
+---
+
 ### 2026-05-29 — Probe v12: link the gomobile static archive into the extension via `-force_load`
 
 - v11 (entry below) classified the run as

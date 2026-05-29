@@ -130,10 +130,15 @@ Mode.
 
 ## Milestone 3 — PacketTunnelProvider / gomobile feasibility probe
 
-**Status:** **in progress** on branch
-`packet-tunnel-gomobile-probe` (build/link probe only — no runtime
-wiring). The runtime / on-device portion still depends on
-Milestone 2.
+**Status:** **build/link probe complete** on branch
+`packet-tunnel-gomobile-probe`. Probe v12 (run
+[26634679085](https://github.com/artpm4250-png/olcrtc-ios/actions/runs/26634679085))
+classification `PASS-STATIC-LINKED`. The static-link
+architecture is locked in by [ADR-0013](ai/DECISIONS.md). The
+runtime / on-device portion of this milestone (real `startTunnel`
+wiring, memory-budget stress) still depends on Milestone 2 and
+the next implementation milestone (`packet-tunnel-runtime-skeleton`,
+below).
 
 **Goal:** verify that `OlcRTCMobile.xcframework` can be linked into
 the `PacketTunnelProvider` extension target under
@@ -235,13 +240,85 @@ extension memory budget.
 - The extension target links cleanly with
   `APPLICATION_EXTENSION_API_ONLY = YES` and the gomobile static
   archive force-loaded into the extension executable (probe v12
-  classification `PASS-STATIC-LINKED`).
+  classification `PASS-STATIC-LINKED`). **Met** by run
+  [26634679085](https://github.com/artpm4250-png/olcrtc-ios/actions/runs/26634679085).
 - `startTunnel` runs to completion against a real olcRTC endpoint
   and `NEPacketTunnelFlow.readPackets` starts producing data.
 - The extension process stays under the iOS memory budget for a
   10-minute session.
 - The main app's Logs tab shows extension log lines via the App
   Group log file, with sanitization preserved end-to-end.
+
+---
+
+## Milestone 3.5 — `packet-tunnel-runtime-skeleton`
+
+**Status:** not started. Direct successor to Milestone 3 now that
+the build/link probe is green and the static-link architecture is
+recorded in [ADR-0013](ai/DECISIONS.md).
+
+**Goal:** wire the lifecycle skeleton between the host app and the
+`PacketTunnelProvider` extension *without* starting any olcRTC
+network runtime. The extension will start and stop cleanly, read
+the selected profile from a shared config surface, and write its
+own logs — all without calling `MobileStart*` / `MobileCheck` /
+`MobilePing`. This is the last unsigned-CI step before signed-device
+work in Milestone 4.
+
+**Branch:** `packet-tunnel-runtime-skeleton`.
+
+**Tasks:**
+- [ ] Define the shared config surface between the app and the
+      extension. Likely shape: app writes the selected
+      `PacketTunnelConfig` into the App Group container (or
+      Keychain for `keyHex`, per ADR-0010 follow-up) and the
+      extension reads it from the same container during
+      `startTunnel`. No new entitlements yet — App Group
+      attachment lands when signing does.
+- [ ] Extend `PacketTunnelProvider.startTunnel(options:)` to:
+      read the selected profile from the shared surface; validate
+      it; log the resolved (sanitized) profile fields; return
+      `notWiredYet` after logging. **No** `MobileStart*` /
+      `MobileCheck` / `MobilePing`. **No** sockets. **No**
+      `NEPacketTunnelNetworkSettings.setTunnelNetworkSettings`.
+- [ ] Implement `PacketTunnelProvider.stopTunnel(with:completionHandler:)`
+      — clean teardown of any state the skeleton allocates (none
+      yet from gomobile; just lifecycle scaffolding).
+- [ ] Mirror sanitized extension logs into the App Group so the
+      main app's Logs tab can show them end-to-end. Reuse the
+      existing `LogSanitizer` (ADR-0010) — no new sanitization
+      paths.
+- [ ] Update the probe / build workflows to keep asserting the
+      v12 contract: gomobile static archive is linked into the
+      `.appex` executable; no `OlcRTCMobile.framework` directory
+      inside `.appex/Frameworks`; no `.xcframework` leak;
+      `APPLICATION_EXTENSION_API_ONLY = YES` stays.
+
+**Blockers:**
+- None for the skeleton itself — the architecture is locked in by
+  ADR-0013, the static link works under unsigned CI, and the
+  shared-surface read/write is plain Foundation work.
+- Anything that calls into gomobile starter functions or actually
+  brings up a tunnel still requires the signed-device path
+  (Milestone 2 → Milestone 4).
+
+**Acceptance criteria:**
+- The host app writes the selected `PacketTunnelConfig` into a
+  shared surface that survives across the app/extension boundary.
+- `PacketTunnelProvider` reads that config in `startTunnel`,
+  validates it, sanitized-logs the result, and returns the
+  existing `notWiredYet` failure. The extension does not start
+  any olcRTC network runtime.
+- `PacketTunnelProvider.stopTunnel` is symmetric and idempotent
+  for whatever state the skeleton holds.
+- No secrets land in any log sink (App Group log file or
+  in-app Logs tab) — covered by `LogSanitizer` / `LogSanitizerTests`.
+- The unsigned CI pipelines stay green; the v12 contract
+  (`PASS-STATIC-LINKED`, no embedded framework, no `.xcframework`
+  leak, `APPLICATION_EXTENSION_API_ONLY = YES`) keeps passing.
+- The signed-device runtime requirement remains documented in
+  [ADR-0008](ai/DECISIONS.md) and Milestone 4 — this milestone
+  does not unblock VPN runtime, only the lifecycle skeleton.
 
 ---
 
