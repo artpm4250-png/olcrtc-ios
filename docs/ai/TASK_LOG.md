@@ -9,6 +9,93 @@ Date format: `YYYY-MM-DD`. Each entry should answer **what** changed and
 
 ---
 
+### 2026-05-29 — Probe v4 result: `-needed_framework` did **not** survive ld_prime + WMO
+
+- Run:
+  [`Packet Tunnel Gomobile Probe` 26606165919](https://github.com/artpm4250-png/olcrtc-ios/actions/runs/26606165919)
+  on commit
+  [`f3e4933`](https://github.com/artpm4250-png/olcrtc-ios/commit/f3e4933).
+  Conclusion: **failure**. The build itself succeeded — the
+  extension compiled cleanly and the linker invocation completed
+  without errors. The CI **assertion step** failed.
+- Verified from the Xcode log: the Ld step for
+  `PacketTunnelProvider.appex/PacketTunnelProvider` invoked clang
+  with **both** `-Wl,-needed_framework,OlcRTCMobile` (from the
+  target's `OTHER_LDFLAGS`) **and** `-framework OlcRTCMobile`
+  (from the XcodeGen dependency `link: true`). `-dead_strip` was
+  also passed. Despite that, the resulting binary's load commands
+  contain no `Frameworks/OlcRTCMobile.framework/OlcRTCMobile` line
+  (full `otool -L` output: only `libresolv`, Foundation, libobjc,
+  libSystem, CoreFoundation, NetworkExtension, Security, the swift
+  runtime libs). `nm -u "$APPEX/PacketTunnelProvider" | grep -c Mobile = 0` —
+  not a single `Mobile`-prefixed undefined symbol survived into the
+  extension binary.
+- `APPLICATION_EXTENSION_API_ONLY = YES` remained set throughout —
+  no diagnostic from clang or swiftc about extension-restricted
+  API; the per-target build setting is unchanged from probe v3.
+  Code signing stayed disabled (`CODE_SIGNING_ALLOWED = NO`,
+  `CODE_SIGN_IDENTITY = ""`) and entitlements remained detached.
+- Diagnosis. The empty `Mobile`-prefixed undef count is the
+  smoking gun: by the time the linker runs, the Swift compile
+  output for the extension target contains **zero** references
+  to any `Mobile*` symbol from `OlcRTCMobile`. Probe v2 added
+  the stored property
+  `private let _gomobileLinkAnchor: Bool = GomobileExtensionProbe.touch()`
+  on `final class PacketTunnelProvider`, but at `-O
+  -whole-module-optimization` the Swift optimizer can prove
+  nothing reads that `private let`, so it elides the storage and
+  — with it — the initializer's `MobileSetDebug(false)` and
+  `MobileIsRunning()` calls. With no surviving symbol reference,
+  ld_prime's `-dead_strip` then removes the `LC_LOAD_DYLIB` for
+  `OlcRTCMobile` even though `-needed_framework` was supplied
+  earlier on the same command line: the trailing `-framework
+  OlcRTCMobile` (XcodeGen-injected) re-registers the same
+  framework as a regular reference, and on Xcode 16.4's ld_prime
+  the regular registration appears to win — when the regular
+  reference has zero surviving uses, the framework is stripped
+  outright. The Swift-level elision is the upstream cause; the
+  `-needed_framework` shadowing is the downstream cause.
+- What this means. The probe's *narrow* original goal —
+  "extension target compiles and the linker invocation completes
+  cleanly with `APPLICATION_EXTENSION_API_ONLY = YES`
+  against `OlcRTCMobile.xcframework`" — was already proven by
+  probe v1
+  ([26600505401](https://github.com/artpm4250-png/olcrtc-ios/actions/runs/26600505401),
+  green on `bdf0c3d`). The *stricter* goal added in v2-v4 —
+  "and the resulting binary actually carries the `OlcRTCMobile`
+  load command" — is not yet proven. Linker-side flags alone
+  are not enough on this toolchain; the next probe needs to
+  defeat the **Swift-side** dead-strip (e.g. expose the
+  references through `@objc dynamic` storage on the principal
+  class, or via an `@_used` `@_cdecl` top-level function in the
+  probe file) so the extension's object code carries surviving
+  references to `MobileSetDebug` / `MobileIsRunning` before the
+  linker ever sees the input.
+- Files unchanged on disk relative to `f3e4933`:
+  - `ios/OlcRTCClient/project.yml` — extension target still
+    `APPLICATION_EXTENSION_API_ONLY: YES`, signing disabled,
+    entitlements not attached, framework dependency `embed:
+    false / codeSign: false / link: true`,
+    `OTHER_LDFLAGS: $(inherited) -lresolv -Wl,-needed_framework,OlcRTCMobile`.
+  - `Sources/PacketTunnelProvider/GomobileExtensionProbe.swift` —
+    `enum GomobileExtensionProbe { @discardableResult static
+    func touch() -> Bool { MobileSetDebug(false); return
+    MobileIsRunning() } }` under `#if canImport(OlcRTCMobile)`.
+    Confirmed compiled (visible in
+    `SwiftCompile normal arm64 Compiling … GomobileExtensionProbe.swift …`).
+  - `Sources/PacketTunnelProvider/PacketTunnelProvider.swift` —
+    `private let _gomobileLinkAnchor: Bool = GomobileExtensionProbe.touch()`
+    on `final class PacketTunnelProvider`.
+  - `.github/workflows/packet-tunnel-gomobile-probe.yml` — confirm
+    step still hard-fails on missing `OlcRTCMobile.framework/OlcRTCMobile`
+    in `otool -L`; `Mobile`-prefixed undef count is a diagnostic
+    only.
+- Probe v4 ends here. No code or workflow changes follow this
+  result; the next probe (v5) should be opened in a new entry
+  with its own commit.
+
+---
+
 ### 2026-05-29 — Probe v4: force the load command via `-needed_framework`
 
 - Probe v3 (`f599e12`) replaced the Swift-side anchor with
