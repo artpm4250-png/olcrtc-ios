@@ -3,65 +3,59 @@
 // Compile/link probe (branch `packet-tunnel-gomobile-probe`,
 // Milestone 3 in `docs/ROADMAP.md`) — Objective-C / C anchor that
 // keeps the extension binary's link edge to
-// `OlcRTCMobile.xcframework` alive across Swift WMO **and** ld_prime
-// LTO + `-dead_strip`.
+// `OlcRTCMobile.xcframework` alive across Swift WMO, ld_prime's
+// `-dead_strip`, ld_prime's unused-dylib pruning, **and** any
+// future LTO-pass that prefers to fold call sites with discarded
+// results.
 //
-// **Why C, not Swift, and why function pointers, not direct calls.**
-// Probe v2-v4: a Swift `private let` calling
-// `MobileIsRunning` / `MobileSetDebug` was eliminated by Swift
-// `-O -whole-module-optimization` before the linker ever ran, so the
-// `Mobile*` symbol references never reached the link step.
-// Probe v5: an ObjC/C function with `__attribute__((used))` and a
-// matching `-Wl,-u,_OlcRTCExtensionGomobileLinkAnchor` made the
-// **anchor symbol** survive into the final binary
-// (`0000000100004000 T _OlcRTCExtensionGomobileLinkAnchor` in
-// `nm`), but Xcode 16.4's default LTO + `-Os` + ARC folded the
-// anchor's two-call body into effectively a `ret`: the return value
-// of `MobileIsRunning()` was cast to `(void)`, `MobileSetDebug(NO)`
-// returns void, neither has any LTO-visible side effect, and both
-// calls were dropped as dead. With no surviving call sites the
-// extension binary shipped with no `LC_LOAD_DYLIB` for OlcRTCMobile.
-// `__attribute__((used))` protects only the **symbol**, not the
-// statements inside the body. See
-// `docs/ai/TASK_LOG.md` — `2026-05-29 — Probe v5 result`.
+// **History (full chain in `docs/ai/TASK_LOG.md`).**
+// - v2 used a Swift `private let` calling
+//   `MobileIsRunning` — Swift WMO eliminated it before the
+//   linker ran.
+// - v3 added `-Wl,-u,_MobileIsRunning` — ld dead-stripped the
+//   framework anyway.
+// - v4 added `-Wl,-needed_framework,OlcRTCMobile` — ld_prime
+//   allowed the trailing `-framework OlcRTCMobile` to shadow
+//   the `needed` flag.
+// - v5 moved the anchor to a C function with
+//   `__attribute__((used))` — the symbol survived but LTO + -Os
+//   folded its body.
+// - v6 made the anchor's gomobile references data relocations
+//   via static function-pointer initializers plus `volatile` +
+//   `optnone` — the .o files had `U _MobileIsRunning` and
+//   `U _MobileSetDebug`, but ld_prime still nullified the
+//   relocations.
+// - v7 set `LLVM_LTO = NO` on the extension target. The full
+//   xcodebuild log of the v7 run confirmed clang per-TU compile
+//   carried no `-flto=…`, i.e. LTO was actually off at compile
+//   time. The link edge still died — proving the culprit is
+//   ld_prime's regular dead-strip / unused-dylib pruning, not
+//   LTO. `__attribute__((used))` keeps the storage of static
+//   variables, but not the **data relocations** that fill those
+//   storage slots from external symbols, when ld decides
+//   nothing live references those symbols.
 //
-// Probe v6 puts the gomobile symbol references into Mach-O **data
-// relocations**, not call instructions:
+// **What v8 changes.** A `__attribute__((constructor))` function
+// is added next to the existing linker-forced anchor. dyld
+// scans `__DATA,__mod_init_func` at module load and calls every
+// constructor — those calls are roots of the binary's
+// reachability graph, exactly the way `_main` /
+// `_NSExtensionMain` is. ld cannot dead-strip a constructor
+// without breaking module initialization, so the constructor's
+// body — including its direct calls to `MobileIsRunning` and
+// `MobileSetDebug` — must survive into the final binary as
+// real call instructions, which in turn force the linker to
+// keep `LC_LOAD_DYLIB` for `OlcRTCMobile`.
 //
-//   - Two `static volatile` function-pointer variables are
-//     initialized with `MobileIsRunning` and `MobileSetDebug`. In
-//     C, a function-designator decays to its address; the
-//     initializer is a constant expression at compile time but
-//     its value is not known until link time, so clang emits a
-//     relocation entry against the external symbols
-//     `_MobileIsRunning` and `_MobileSetDebug`. Those relocations
-//     are not "calls" — LTO has no notion of "the result of this
-//     pointer is unused", so it cannot eliminate the entries the
-//     way it eliminated the v5 call sites. ld must resolve the
-//     relocations against `OlcRTCMobile.framework` regardless of
-//     whether anything in the binary ever calls through them, and
-//     resolving them forces `LC_LOAD_DYLIB` for the framework to
-//     stay.
-//   - `__attribute__((used))` on each variable prevents the
-//     compiler / LTO from removing the variable itself even if
-//     nothing reads it.
-//   - `volatile` makes every read and write to the variable an
-//     observable side effect under the C standard, so the
-//     anchor function below cannot be optimized to a no-op even
-//     if its return values are discarded.
-//   - The anchor function adds `__attribute__((noinline,
-//     optnone))` so its body is compiled with optimization
-//     disabled. `optnone` is preserved through to LTO; the
-//     anchor's volatile loads, the indirect call, the volatile
-//     store, and the second indirect call are all kept.
-//
-// The combination makes any one of three independent guarantees
-// sufficient to keep the link edge:
-//   (1) the static-variable relocations alone (data segment),
-//   (2) the volatile loads/stores in the anchor body,
-//   (3) the anchor symbol forced by `-Wl,-u,_OlcRTCExtensionGomobileLinkAnchor`.
-// All three would have to fail simultaneously for the extension
-// binary to ship without `OlcRTCMobile.framework`.
+// The linker-forced anchor
+// (`OlcRTCExtensionGomobileLinkAnchor` + the
+// `-Wl,-u,_OlcRTCExtensionGomobileLinkAnchor` flag in
+// `project.yml`) is intentionally kept alongside the
+// constructor. Two independent live paths are better than one:
+// if Apple ever changes module-init handling, the linker-forced
+// anchor still keeps the symbol; if `-Wl,-u` is ever removed
+// from `OTHER_LDFLAGS`, the constructor still keeps the
+// references.
 //
 // **What this file does NOT do.**
 // - It does not start the olcRTC runtime. `MobileStart`,
@@ -70,40 +64,50 @@
 // - It does not open sockets, configure
 //   `NEPacketTunnelNetworkSettings`, or touch
 //   `NEPacketTunnelFlow`.
-// - `OlcRTCExtensionGomobileLinkAnchor` is never invoked from
-//   `PacketTunnelProvider.startTunnel` — `startTunnel` still
-//   fails fast with `notWiredYet`. The anchor exists for the
-//   linker, not for the runtime; nothing in the live code path
-//   depends on its return value or side effects.
-// - The two functions referenced — `MobileIsRunning` (pure
-//   status read, returns false before any `MobileStart*`) and
-//   `MobileSetDebug` (configure-only flag flip) — are the
-//   safest pair on the gomobile surface. Even if the anchor
-//   ever ran, neither would touch the network or any I/O.
+// - The constructor body and the linker-forced anchor are
+//   never invoked from `PacketTunnelProvider.startTunnel` —
+//   `startTunnel` still fails fast with `notWiredYet`.
+// - `MobileIsRunning` (pure status read, returns `NO` before
+//   any `MobileStart*` is called) and `MobileSetDebug`
+//   (configure-only flag flip) are the safest pair on the
+//   gomobile surface. Both calls happen once at module-init
+//   inside the extension process; neither touches the network
+//   or any I/O. The extension is **not yet ever loaded** by
+//   the system in the unsigned CI build path (no signing →
+//   no `NETunnelProviderManager` install), so even the
+//   constructor itself does not run in CI today.
 
 #import <Foundation/Foundation.h>
 #import <OlcRTCMobile/OlcRTCMobile.h>
 
-typedef BOOL (*OlcRTCMobileIsRunningFn)(void);
-typedef void (*OlcRTCMobileSetDebugFn)(BOOL);
-
+// Volatile sink used by both anchors. Marked `used` so the
+// optimizer cannot remove the storage, and `volatile` so reads
+// and writes are observable behavior under the C standard.
 __attribute__((used))
 static volatile BOOL OlcRTCGomobileBoolSink = NO;
 
+// v8 constructor anchor. Registered with dyld via
+// `__DATA,__mod_init_func`; runs once at module load. ld
+// treats this as live regardless of any `-dead_strip` /
+// unused-dylib heuristics because dyld dispatches to it.
+__attribute__((constructor))
 __attribute__((used))
-static volatile OlcRTCMobileIsRunningFn OlcRTCGomobileIsRunningPtr = MobileIsRunning;
+static void OlcRTCExtensionGomobileConstructorAnchor(void) {
+    BOOL running = MobileIsRunning();
+    OlcRTCGomobileBoolSink = running;
+    MobileSetDebug(OlcRTCGomobileBoolSink);
+}
 
-__attribute__((used))
-static volatile OlcRTCMobileSetDebugFn OlcRTCGomobileSetDebugPtr = MobileSetDebug;
-
+// v5/v6 linker-forced anchor. Kept in place so the
+// `-Wl,-u,_OlcRTCExtensionGomobileLinkAnchor` flag in the
+// extension target's `OTHER_LDFLAGS` continues to have a
+// definition to anchor on, and so a future toolchain change
+// that breaks module-init handling still has the linker-force
+// path as a fallback. `optnone` keeps the body's volatile
+// loads and indirect calls from being folded.
 __attribute__((used, noinline, optnone))
 void OlcRTCExtensionGomobileLinkAnchor(void) {
-    OlcRTCMobileIsRunningFn isRunning =
-        (OlcRTCMobileIsRunningFn)OlcRTCGomobileIsRunningPtr;
-    OlcRTCMobileSetDebugFn setDebug =
-        (OlcRTCMobileSetDebugFn)OlcRTCGomobileSetDebugPtr;
-
-    BOOL running = isRunning();
+    BOOL running = MobileIsRunning();
     OlcRTCGomobileBoolSink = running;
-    setDebug(OlcRTCGomobileBoolSink);
+    MobileSetDebug(OlcRTCGomobileBoolSink);
 }

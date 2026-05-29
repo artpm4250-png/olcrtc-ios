@@ -9,6 +9,138 @@ Date format: `YYYY-MM-DD`. Each entry should answer **what** changed and
 
 ---
 
+### 2026-05-29 — Probe v8: `__attribute__((constructor))` anchor + fixed LTO classifier
+
+- v7's diagnosis (entry below) was that the link edge dies in
+  ld_prime's **regular** dead-strip / unused-dylib pruning, not
+  in an LTO pass — the full xcodebuild log of the v7 run
+  confirmed `-flto=…` was absent from every per-TU clang /
+  swiftc invocation, yet the symbol outcome was identical to
+  the v6 (LTO-on) run. ld can nullify a data-segment
+  relocation that fills a function-pointer slot from an
+  external dylib when no symbol in the binary references that
+  dylib's exports through a path it treats as reachable, even
+  with LTO completely off. `__attribute__((used))` keeps
+  storage, not the relocation that fills it. The remaining
+  move that does not require `embed: true` is to make the
+  reference part of module initialization — a path ld must
+  preserve to keep the binary usable at all.
+- File rewritten:
+  `ios/OlcRTCClient/Sources/PacketTunnelProvider/GomobileExtensionLinkAnchor.m`.
+  The file now contains two independent anchors:
+
+  ```objc
+  __attribute__((used))
+  static volatile BOOL OlcRTCGomobileBoolSink = NO;
+
+  __attribute__((constructor))
+  __attribute__((used))
+  static void OlcRTCExtensionGomobileConstructorAnchor(void) {
+      BOOL running = MobileIsRunning();
+      OlcRTCGomobileBoolSink = running;
+      MobileSetDebug(OlcRTCGomobileBoolSink);
+  }
+
+  __attribute__((used, noinline, optnone))
+  void OlcRTCExtensionGomobileLinkAnchor(void) {
+      BOOL running = MobileIsRunning();
+      OlcRTCGomobileBoolSink = running;
+      MobileSetDebug(OlcRTCGomobileBoolSink);
+  }
+  ```
+
+  - The constructor is the v8 primary anchor.
+    `__attribute__((constructor))` puts a pointer to it in
+    `__DATA,__mod_init_func`. dyld walks that section at
+    module load and calls every entry — the call sites
+    inside the constructor are roots of the binary's
+    reachability graph that ld cannot drop without breaking
+    module init. The call instructions to `MobileIsRunning`
+    and `MobileSetDebug` therefore must remain in the final
+    binary as real branch-with-link instructions with
+    relocations against `_MobileIsRunning` /
+    `_MobileSetDebug`, which in turn force ld to keep
+    `LC_LOAD_DYLIB` for `OlcRTCMobile`.
+  - The v5/v6 linker-forced anchor
+    (`OlcRTCExtensionGomobileLinkAnchor` +
+    `-Wl,-u,_OlcRTCExtensionGomobileLinkAnchor` in
+    `OTHER_LDFLAGS`) is kept alongside the constructor.
+    Two independent live paths are better than one: if a
+    future toolchain change breaks module-init handling,
+    the linker-force path still keeps the symbol; if the
+    `-Wl,-u` flag is ever removed from `OTHER_LDFLAGS`,
+    the constructor still keeps the references. The two
+    anchors are textually nearly identical so a future
+    reader can compare them at a glance.
+  - The constructor runs at **module init** inside the
+    extension process. In the current unsigned CI build
+    path the extension is never loaded by the system at
+    all (no signing → no `NETunnelProviderManager` install
+    → no `PacketTunnelProvider.appex` ever launched), so
+    in CI today the constructor's call to `MobileIsRunning`
+    + `MobileSetDebug` does not even execute. It exists
+    purely so ld must keep the references and the
+    framework's load command. Once VPN Mode runs for real
+    (Milestone 4), the constructor's `MobileIsRunning`
+    will return `NO` and `MobileSetDebug(NO)` will flip a
+    debug flag — both are safe pre-`MobileStart` calls
+    documented in `docs/ai/GOMOBILE_BINDINGS.md`.
+- `ios/OlcRTCClient/project.yml` — extension target settings
+  unchanged from v7 except for the historical-context
+  comment:
+  - `APPLICATION_EXTENSION_API_ONLY: YES` still set.
+  - `LLVM_LTO: NO` still set (kept from v7; the v8 strategy
+    does not require LTO to be off, but turning it back on
+    now would muddy the diagnostic).
+  - `OTHER_LDFLAGS: $(inherited) -lresolv -Wl,-u,_OlcRTCExtensionGomobileLinkAnchor`
+    — no `-Wl,-needed_framework,OlcRTCMobile`, no
+    `embed: true`, no `embed: true` on the framework
+    dependency.
+  - Framework dependency on the extension target stays
+    `embed: false, codeSign: false, link: true`.
+  - Signing disabled, entitlements detached.
+  - `PacketTunnelProvider.startTunnel` still fails fast
+    with `notWiredYet`.
+- `.github/workflows/packet-tunnel-gomobile-probe.yml`
+  confirm-step classifier is corrected. v7 misclassified
+  because it derived `lto_still_enabled` from the mere
+  presence of `-Xlinker -object_path_lto -Xlinker
+  …_lto.o` in the Ld command — but Xcode 16.4 passes that
+  flag in Release iphoneos builds **unconditionally**, even
+  when `LLVM_LTO = NO` and no input .o file contains LTO
+  bitcode. v8:
+  - **Drops** the `FAIL-LTO-STILL-ENABLED` classification.
+    The remaining live classes are PASS, PASS-WEAK,
+    FAIL-STRIPPED-BEFORE-LINK, FAIL-STRIPPED-AFTER-LINK,
+    FAIL-OTHER.
+  - **Adds** two diagnostic signals printed next to the
+    other facts:
+    - `compile_has_flto` — `1` if any per-TU clang /
+      swiftc invocation in `build/xcodebuild.log` carries
+      `-flto=…`. This is the **decisive** signal that LTO
+      is actually running.
+    - `ld_has_object_path_lto` — `1` if the Ld step
+      contains `-object_path_lto`. The line that prints
+      this explicitly labels it "NOT decisive — Xcode 16.4
+      passes this regardless of LLVM_LTO" so a future
+      reader does not repeat the v7 trap.
+  - The classifier itself no longer reads either LTO
+    signal; the verdict comes purely from symbol facts
+    (`otool -L`, `nm -u` on final binary, aggregate Mobile*
+    undefs in intermediate `.o` files).
+- Acceptance criterion (probe v8): the workflow runs green
+  AND the `D. Result classification` line reads `PASS` (not
+  `PASS-WEAK`), the final binary's `nm -u` shows at least
+  one of `_MobileIsRunning` / `_MobileSetDebug`,
+  `otool -L` lists
+  `Frameworks/OlcRTCMobile.framework/OlcRTCMobile`, the
+  printed `compile_has_flto` matches the build setting
+  (`0` here), and `APPLICATION_EXTENSION_API_ONLY = YES`
+  is still set. No IPA, no app tests, no extension
+  runtime, no Go core changes.
+
+---
+
 ### 2026-05-29 — Probe v7 result: classifier = `FAIL-LTO-STILL-ENABLED` (but read the asterisk)
 
 - Run:
