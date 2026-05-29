@@ -9,6 +9,99 @@ Date format: `YYYY-MM-DD`. Each entry should answer **what** changed and
 
 ---
 
+### 2026-05-29 — Probe v7: disable LTO for the `PacketTunnelProvider` target
+
+- v6's diagnosis (entry below) localised the failure to ld_prime's
+  whole-program LTO pass: clang's per-translation-unit defenses
+  (static function-pointer initializers, `__attribute__((used))`,
+  `volatile`, `optnone`) all worked — both
+  `PacketTunnelProvider.o` and `GomobileExtensionLinkAnchor.o` in
+  the intermediate `.o` set carry `U _MobileIsRunning` and
+  `U _MobileSetDebug` — but the final extension binary's bind
+  table and load commands lost them. ld_prime+LTO nullified the
+  relocations even though the storage of the static pointers
+  survived. Linker-flag and per-TU mitigations are exhausted;
+  v7 attacks the LTO layer directly by turning LTO off for the
+  extension target.
+- `ios/OlcRTCClient/project.yml`, `PacketTunnelProvider` target,
+  `settings.base` gains a single new line:
+
+  ```yaml
+  LLVM_LTO: NO
+  ```
+
+  This is the canonical Xcode build setting for "no link-time
+  optimization" — XcodeGen forwards string keys in
+  `settings.base` to Xcode verbatim. With `LLVM_LTO = NO` the
+  extension target's clang compile drops `-flto=…` and the ld
+  step drops `-Xlinker -object_path_lto -Xlinker
+  …PacketTunnelProvider_lto.o`. The host app target is
+  untouched — its own `iOS App + Gomobile Build` workflow still
+  uses whatever LTO setting it had. The gomobile xcframework's
+  own link footprint is also untouched: the framework is a
+  prebuilt binary produced by `scripts/build-gomobile-ios.sh`,
+  not a `.o` consumed by LTO.
+- `ios/OlcRTCClient/Sources/PacketTunnelProvider/GomobileExtensionLinkAnchor.m`
+  is unchanged from v6 (`4d179b4`). The hard C anchor + static
+  volatile function-pointer initializers + `optnone` survived
+  per-TU, which v6 proved by section B of the confirm step
+  (both `PacketTunnelProvider.o` and
+  `GomobileExtensionLinkAnchor.o` had the Mobile* undefs). With
+  LTO out of the picture, that per-TU artifact is the input ld
+  actually links, and the relocations against `_MobileIsRunning`
+  / `_MobileSetDebug` should now reach the final binary's bind
+  table.
+- `ios/OlcRTCClient/project.yml`, `OTHER_LDFLAGS` for the
+  extension target stays
+  `$(inherited) -lresolv -Wl,-u,_OlcRTCExtensionGomobileLinkAnchor`.
+  `-Wl,-needed_framework,OlcRTCMobile` is **not** added back: a
+  v7 PASS must come from real surviving relocations through the
+  classic non-LTO link path and the implicit `-framework
+  OlcRTCMobile` from the XcodeGen dependency, not from a "keep
+  load command anyway" override.
+- `APPLICATION_EXTENSION_API_ONLY = YES` remains set on the
+  extension target. Code signing stays disabled
+  (`CODE_SIGNING_ALLOWED = NO`, `CODE_SIGN_IDENTITY = ""`).
+  Entitlements stay detached. `OlcRTCMobile.xcframework`
+  dependency on the extension target stays `embed: false,
+  codeSign: false, link: true` — v7 does **not** switch to
+  `embed: true`; that path (option (c) in v6's diagnosis)
+  stays in reserve. `PacketTunnelProvider.startTunnel` still
+  fails fast with `notWiredYet`.
+- `.github/workflows/packet-tunnel-gomobile-probe.yml` confirm
+  step extends the v6 classifier with one extra signal and one
+  extra classification:
+  - `lto_still_enabled` is derived from the captured Ld step in
+    section C: it is `1` if the Ld command still contains
+    `-object_path_lto`, `0` otherwise. The value is printed
+    next to the existing diagnostics.
+  - A new classification `FAIL-LTO-STILL-ENABLED` fires when
+    the result would otherwise be a `FAIL-*` and
+    `lto_still_enabled == 1`. This tells the next iteration
+    that the build setting did not flow through to the actual
+    linker invocation, which is a different problem from "LTO
+    flowed through but the references still died" — the
+    latter would still classify as `FAIL-STRIPPED-AFTER-LINK`
+    and point at escalation paths (b) and (c) from v6.
+  - The ordering keeps `PASS` / `PASS-WEAK` ahead of the
+    LTO-still-enabled check: if `otool -L` lists OlcRTCMobile
+    we report PASS regardless of whether LTO was on. The
+    LTO-still-enabled classification only matters in the FAIL
+    space.
+- Acceptance criterion (probe v7): the workflow runs green
+  AND the `D. Result classification` line reads `PASS` (not
+  `PASS-WEAK`, not `FAIL-LTO-STILL-ENABLED`), the captured Ld
+  step has no `-object_path_lto`, the final binary's `nm -u`
+  shows at least one of `_MobileIsRunning` /
+  `_MobileSetDebug`, and `otool -L` lists
+  `Frameworks/OlcRTCMobile.framework/OlcRTCMobile`. The
+  extension still compiles cleanly under
+  `APPLICATION_EXTENSION_API_ONLY = YES` and code signing
+  stays disabled. No IPA, no app tests, no extension runtime,
+  no Go core changes.
+
+---
+
 ### 2026-05-29 — Probe v6 result: classification = `FAIL-STRIPPED-AFTER-LINK`
 
 - Run:

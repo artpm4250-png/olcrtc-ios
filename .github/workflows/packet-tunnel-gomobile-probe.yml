@@ -202,15 +202,33 @@ jobs:
           # ---------- C. Linker command ----------
           echo
           echo "=== C. Ld step for PacketTunnelProvider.appex (from xcodebuild log) ==="
+          ld_step="(unavailable)"
           if [ -f build/xcodebuild.log ]; then
-            awk '
+            ld_step="$(awk '
               /^Ld .*PacketTunnelProvider\.appex\/PacketTunnelProvider normal/ { capture=1; print; next }
               capture==1 && /^[[:space:]]/ { print; next }
               capture==1 { capture=0 }
-            ' build/xcodebuild.log || true
+            ' build/xcodebuild.log || true)"
+            echo "$ld_step"
           else
             echo "(xcodebuild.log not present)"
           fi
+
+          # Did LTO actually disappear from the linker command?
+          # Probe v7 sets `LLVM_LTO = NO` for this target; if the
+          # build setting did not take effect the Ld step still
+          # carries `-Xlinker -object_path_lto -Xlinker
+          # …PacketTunnelProvider_lto.o`. Either way we want this
+          # surfaced explicitly in the log and the classification
+          # below.
+          if [ "$ld_step" != "(unavailable)" ] && \
+             echo "$ld_step" | grep -q -- '-object_path_lto'; then
+            lto_still_enabled=1
+          else
+            lto_still_enabled=0
+          fi
+          echo
+          echo "LTO still enabled (Ld step carries -object_path_lto): $lto_still_enabled"
 
           # ---------- D. Classification ----------
           echo
@@ -219,7 +237,8 @@ jobs:
           # step), so FAIL-COMPILE and FAIL-LINK do not apply here —
           # those would have aborted the previous step with a clang
           # or ld diagnostic. The remaining live classifications are:
-          #   PASS, FAIL-STRIPPED-BEFORE-LINK, FAIL-STRIPPED-AFTER-LINK,
+          #   PASS, PASS-WEAK, FAIL-LTO-STILL-ENABLED,
+          #   FAIL-STRIPPED-BEFORE-LINK, FAIL-STRIPPED-AFTER-LINK,
           #   FAIL-OTHER.
           otool_has_olcrtc=0
           if otool -L "$APPEX/PacketTunnelProvider" 2>/dev/null \
@@ -232,10 +251,17 @@ jobs:
             classification="PASS"
           elif [ "$otool_has_olcrtc" -eq 1 ] && [ -z "$final_mobile_undefs" ]; then
             # Load command is present but no surviving undef refs —
-            # unusual for v6 (its design is to keep both). Treat as
-            # PASS for the original "extension links against
+            # unusual for v6+ (the C anchor is supposed to keep both).
+            # Treat as PASS for the original "extension links against
             # OlcRTCMobile" goal but flag the missing undefs.
             classification="PASS-WEAK"
+          elif [ "$lto_still_enabled" -eq 1 ]; then
+            # Probe v7 specifically: if `LLVM_LTO = NO` did not flow
+            # through to the actual linker invocation, classify
+            # explicitly so the next iteration knows to pick a
+            # different setting spelling rather than another anchor
+            # strategy.
+            classification="FAIL-LTO-STILL-ENABLED"
           elif [ "$obj_has_mobile_refs" -eq 0 ] && [ "$obj_count" -gt 0 ]; then
             classification="FAIL-STRIPPED-BEFORE-LINK"
           elif [ "$obj_has_mobile_refs" -eq 1 ] && [ "$otool_has_olcrtc" -eq 0 ]; then
@@ -249,11 +275,18 @@ jobs:
           echo "  final binary has Mobile* undef refs: $([ -n "$final_mobile_undefs" ] && echo 1 || echo 0)"
           echo "  intermediate .o has Mobile* undef refs: $obj_has_mobile_refs"
           echo "  intermediate .o file count: $obj_count"
+          echo "  LTO still enabled in Ld step: $lto_still_enabled"
 
           case "$classification" in
             PASS|PASS-WEAK)
               echo
               echo "OK: PacketTunnelProvider.appex links against OlcRTCMobile ($classification)."
+              ;;
+            FAIL-LTO-STILL-ENABLED)
+              echo "ERROR: $classification — the Ld step still passes -object_path_lto." >&2
+              echo "       LLVM_LTO = NO in project.yml did not flow through to the actual linker invocation." >&2
+              echo "       Check the captured Ld step above and the target's settings.base in project.yml." >&2
+              exit 1
               ;;
             FAIL-STRIPPED-BEFORE-LINK)
               echo "ERROR: $classification — no Mobile(IsRunning|SetDebug) refs survived in any extension .o file." >&2
