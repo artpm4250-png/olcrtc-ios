@@ -9,6 +9,123 @@ Date format: `YYYY-MM-DD`. Each entry should answer **what** changed and
 
 ---
 
+### 2026-05-29 — Probe v7 result: classifier = `FAIL-LTO-STILL-ENABLED` (but read the asterisk)
+
+- Run:
+  [`Packet Tunnel Gomobile Probe` 26629123088](https://github.com/artpm4250-png/olcrtc-ios/actions/runs/26629123088)
+  on commit
+  [`0c2c7a1`](https://github.com/artpm4250-png/olcrtc-ios/commit/0c2c7a1).
+  Conclusion: **failure**. The v7 classifier wrote
+  `classification: FAIL-LTO-STILL-ENABLED` because the
+  captured Ld step still contains
+  `-Xlinker -object_path_lto -Xlinker
+  …PacketTunnelProvider_lto.o`. Per the v7 spec that flag's
+  presence is treated as "LTO not actually disabled".
+- All other signals are identical to probe v6 (`4d179b4`):
+  - `obj_count: 12`, `obj_has_mobile_refs: 1`. Section B
+    showed `PacketTunnelProvider.o` and
+    `GomobileExtensionLinkAnchor.o` both carry
+    `U _MobileIsRunning` and `U _MobileSetDebug`.
+  - Final binary defined symbols (section A) are the same:
+    `T _OlcRTCExtensionGomobileLinkAnchor` at
+    `0x100004000`, `b _OlcRTCGomobileBoolSink` at
+    `0x101cd99c0`, `d _OlcRTCGomobileIsRunningPtr` at
+    `0x101b95120`, `d _OlcRTCGomobileSetDebugPtr` at
+    `0x101b95128`.
+  - Final binary undef refs (section A):
+    `nm -u | grep -E 'Mobile(IsRunning|SetDebug)'` → empty.
+  - `otool -L "$APPEX/PacketTunnelProvider"` → no
+    `OlcRTCMobile.framework/OlcRTCMobile`.
+- **Important asterisk on the classification.** The
+  `lto_still_enabled` signal is derived from a single grep
+  against `-object_path_lto` in the Ld command. Inspecting
+  the full xcodebuild log of this run shows that the per-TU
+  clang compile for `GomobileExtensionLinkAnchor.m` (and
+  every other .m / .swift file in the extension target) has
+  **no** `-flto=…` flag in its arguments — i.e. the
+  `LLVM_LTO = NO` setting in `project.yml` for the
+  `PacketTunnelProvider` target *did* take effect at the
+  compile stage. Xcode 16.4 appears to pass
+  `-Xlinker -object_path_lto -Xlinker …_lto.o` to ld
+  unconditionally in Release `iphoneos` builds, even when
+  no input .o file carries LTO bitcode. With no bitcode in
+  the inputs, ld has no LTO work to do; the
+  `-object_path_lto` flag becomes a no-op. So the classifier
+  is **flagging a flag, not a behaviour** — the symbol
+  outcome (refs in `.o`, gone from final binary, no load
+  command for OlcRTCMobile) is the v6 outcome **with LTO
+  effectively off at the compile stage**.
+- That changes the diagnosis. If LTO compilation is off and
+  the refs still die between the per-TU `.o` files and the
+  final binary, the culprit is not LTO — it is ld_prime's
+  regular `-dead_strip` pass + the new "unused dylib"
+  pruning behaviour. ld_prime can drop a `LC_LOAD_DYLIB`
+  load command when no symbol in the binary references the
+  dylib's exports, and apparently — at least on Xcode 16.4
+  / iOS 18.5 SDK — it can also rewrite a data-segment slot
+  that was supposed to hold a function pointer from
+  OlcRTCMobile to NULL / a local stub, freeing the
+  dependency. `__attribute__((used))` keeps the storage,
+  but not the relocation that fills it.
+- Implication for the next probe. With both the LTO theory
+  and the per-TU + linker-flag exhaustion behind us, the
+  realistic remaining moves all force the framework
+  reference to exist for reasons ld cannot ignore:
+  - (a) **Embed the framework into the extension target.**
+    Change the dependency in `project.yml` from `embed:
+    false` to `embed: true`. XcodeGen then emits a
+    `Copy Files` (Embed Frameworks) build phase for the
+    extension. The framework's presence in the bundle
+    requires the load command independent of any symbol
+    references — Xcode validates the
+    bundle-vs-load-command consistency at the
+    `embed-frameworks` step and ld can no longer drop the
+    `LC_LOAD_DYLIB` without breaking that. Downside: the
+    Go runtime is duplicated on disk in the host app's
+    `Frameworks/` and the extension's `Frameworks/`
+    (~33 MB framework, ~38 MB linked-in Go runtime per
+    earlier IPA inspection). For a probe target without
+    real runtime work this is fine.
+  - (b) **Bind the references in a
+    `__attribute__((constructor))` function** (or a
+    Sentinel ObjC `+load` class method). These run at
+    module-init time and ld marks them as referenced by
+    the runtime entry path; the function-pointer reads
+    inside become observable initialization, which ld's
+    dead-strip / dylib-pruning treats as live regardless
+    of what `__attribute__((used))` does to the data
+    storage.
+  - (c) **Fix the classifier first** so a future v7-style
+    run reports the real LTO state. Either change the
+    grep to check for `-flto=` in the per-TU compile
+    invocations (the actual signal), or look for a
+    non-empty `_lto.o` artifact on disk. This is hygiene,
+    not a behaviour fix — but without it the next
+    `LLVM_LTO`-touching probe will keep mis-classifying.
+- Files unchanged on disk relative to `0c2c7a1`:
+  - `ios/OlcRTCClient/project.yml` — the extension target
+    keeps `LLVM_LTO: NO`,
+    `APPLICATION_EXTENSION_API_ONLY: YES`,
+    `OTHER_LDFLAGS: $(inherited) -lresolv -Wl,-u,_OlcRTCExtensionGomobileLinkAnchor`,
+    framework dependency `embed: false / codeSign: false / link: true`,
+    signing disabled, entitlements detached.
+  - `ios/OlcRTCClient/Sources/PacketTunnelProvider/GomobileExtensionLinkAnchor.m`
+    — unchanged from v6.
+  - `.github/workflows/packet-tunnel-gomobile-probe.yml` —
+    unchanged; the v7 classifier extension (LTO grep,
+    `FAIL-LTO-STILL-ENABLED` class) stays as-is so the next
+    iteration can either fix it or rely on it.
+  - `PacketTunnelProvider.swift` and
+    `GomobileExtensionProbe.swift` — unchanged.
+    `startTunnel` still fails fast with `notWiredYet`.
+- Probe v7 ends here. The next probe (v8) should start with
+  one of (a) / (b) / (c) above, treating v7's
+  `FAIL-LTO-STILL-ENABLED` as a misnomer for "the link
+  edge still dies and LTO is not the cause we thought it
+  was".
+
+---
+
 ### 2026-05-29 — Probe v7: disable LTO for the `PacketTunnelProvider` target
 
 - v6's diagnosis (entry below) localised the failure to ld_prime's
