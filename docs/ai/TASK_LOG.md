@@ -9,6 +9,99 @@ Date format: `YYYY-MM-DD`. Each entry should answer **what** changed and
 
 ---
 
+### 2026-05-29 — Probe v5 result: C anchor symbol survived, but its `Mobile*` calls were stripped
+
+- Run:
+  [`Packet Tunnel Gomobile Probe` 26627159196](https://github.com/artpm4250-png/olcrtc-ios/actions/runs/26627159196)
+  on commit
+  [`9045db6`](https://github.com/artpm4250-png/olcrtc-ios/commit/9045db6).
+  Conclusion: **failure** at the same confirm step as v4 — the
+  build itself succeeded, including compilation of the new
+  `Sources/PacketTunnelProvider/GomobileExtensionLinkAnchor.m`,
+  but the post-build assertions tripped.
+- Direct evidence captured by the v5 confirm step
+  (`gh run view 26627159196 --log-failed`):
+  - `nm "$APPEX/PacketTunnelProvider" | grep _OlcRTCExtensionGomobileLinkAnchor`
+    →
+    `0000000100004000 T _OlcRTCExtensionGomobileLinkAnchor`.
+    The C anchor symbol **is** defined in the extension binary's
+    text segment. `__attribute__((used))` +
+    `-Wl,-u,_OlcRTCExtensionGomobileLinkAnchor` did their job —
+    the function is in the final image.
+  - `nm -u "$APPEX/PacketTunnelProvider" | grep -E 'Mobile(IsRunning|SetDebug)'`
+    → `(none — no MobileIsRunning / MobileSetDebug undef found)`.
+    The two calls inside the C function body produced **zero**
+    surviving undefined references in the extension binary.
+  - `otool -L "$APPEX/PacketTunnelProvider"` → still no
+    `Frameworks/OlcRTCMobile.framework/OlcRTCMobile` line.
+  - The captured Ld step shows the linker received both the new
+    flag and the kept v4 flag plus the dependency-injected
+    framework reference:
+    `… -lresolv -Wl,-needed_framework,OlcRTCMobile -Wl,-u,_OlcRTCExtensionGomobileLinkAnchor -framework OlcRTCMobile -o …PacketTunnelProvider`.
+    `-dead_strip` is also present (default for Release).
+- Diagnosis. Build settings stayed correct
+  (`APPLICATION_EXTENSION_API_ONLY = YES` confirmed in
+  `project.yml:108`; signing disabled; entitlements detached).
+  The v5 strategy moved the anchor out of Swift's reach — and
+  Swift WMO is no longer the cause: clang did compile
+  `GomobileExtensionLinkAnchor.m` (the symbol's address proves
+  the .o reached the linker). What now strips the references is
+  one layer further down: by default for Release `iphoneos` the
+  Xcode 16.4 link step runs **LTO** (the
+  `-Xlinker -object_path_lto -Xlinker …PacketTunnelProvider_lto.o`
+  flag is in the captured Ld command line, and `_lto.o` exists
+  on the runner). With LTO + `-Os` + ARC, ld_prime appears to
+  fold the two-call body of `OlcRTCExtensionGomobileLinkAnchor`
+  into something equivalent to a single `ret` — the C function
+  remains, but its calls to `MobileIsRunning` (return value
+  cast to `(void)`, no observable use) and
+  `MobileSetDebug(NO)` (void return, no observable use) are
+  treated as dead and removed. With no surviving call sites
+  for `Mobile*`, ld then dead-strips the OlcRTCMobile load
+  command exactly as it did in v4 — `-needed_framework` once
+  again loses to the trailing `-framework OlcRTCMobile`
+  injected by the dependency on this toolchain.
+  `__attribute__((used))` only protects the **symbol**, not the
+  body's individual statements; once optimization runs over the
+  body, the protection ends.
+- Implication for the next probe. The fix is to make the calls
+  *observable* in the C-standard sense so neither LLVM's IR
+  optimizer nor ld's LTO can prove them dead. Concretely, the
+  next iteration should either (a) annotate the anchor with
+  `__attribute__((optnone))` so the function body is compiled
+  unoptimized, (b) write the result of `MobileIsRunning()` to a
+  `volatile`-qualified file-scope variable and call
+  `MobileSetDebug` through a `volatile`-qualified function
+  pointer (volatile accesses are observable behavior and cannot
+  be elided), or (c) take the addresses of `MobileIsRunning` and
+  `MobileSetDebug` as the initializers of static const data
+  visible through the same anchor symbol — the resulting Mach-O
+  relocations are not subject to dead-call elimination.
+  Linker-only mitigations (`-Wl,-u`, `-needed_framework`) have
+  been exhausted; further attempts at that layer will not move
+  the result.
+- Files unchanged on disk relative to `9045db6`:
+  - `ios/OlcRTCClient/Sources/PacketTunnelProvider/GomobileExtensionLinkAnchor.m`
+    — unchanged.
+  - `ios/OlcRTCClient/project.yml` — unchanged
+    (`APPLICATION_EXTENSION_API_ONLY: YES` still on,
+    `OTHER_LDFLAGS: $(inherited) -lresolv -Wl,-needed_framework,OlcRTCMobile -Wl,-u,_OlcRTCExtensionGomobileLinkAnchor`,
+    framework dependency `embed: false / codeSign: false / link: true`,
+    signing disabled, entitlements detached).
+  - `.github/workflows/packet-tunnel-gomobile-probe.yml` —
+    unchanged from `9045db6` (full `otool -L`, Mobile-undef
+    grep, anchor-symbol diagnostic, captured Ld step, both
+    hard assertions).
+  - `Sources/PacketTunnelProvider/PacketTunnelProvider.swift` and
+    `Sources/PacketTunnelProvider/GomobileExtensionProbe.swift`
+    — unchanged. `startTunnel` still fails fast with
+    `notWiredYet`.
+- Probe v5 ends here. The next probe (v6) should address the
+  LTO-elision diagnosis above; no code or workflow changes
+  follow this result.
+
+---
+
 ### 2026-05-29 — Probe v5: ObjC/C anchor + `-Wl,-u,_OlcRTCExtensionGomobileLinkAnchor`
 
 - v4's diagnosis (see entry directly below) was that the link
