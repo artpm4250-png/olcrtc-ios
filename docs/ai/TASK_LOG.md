@@ -9,6 +9,86 @@ Date format: `YYYY-MM-DD`. Each entry should answer **what** changed and
 
 ---
 
+### 2026-05-29 — Milestone 3.5 wrap-up: PR #1 opened, VPN-Mode gated-state UX polish, ROADMAP marked Done
+
+- Opens `packet-tunnel-runtime-skeleton → main` as
+  [PR #1](https://github.com/artpm4250-png/olcrtc-ios/pull/1)
+  with the title **"Milestone 3.5: PacketTunnelProvider runtime
+  skeleton + App Group shared surface (ADR-0013)"**. PR body
+  documents the three Stage 1–3 commits (`aa9effe`, `98773e0`,
+  `be3ceb5`) plus the follow-up commit covered in this entry,
+  the hard-scope boundary (no `MobileStart*`, no sockets, no
+  entitlements attached, no Go-core changes), and the test plan
+  (CI as the only verification surface).
+- UX polish — host app behavior on VPN-Mode Start:
+  - `Sources/App/AppState.swift`: adds a new catch clause for
+    `VPNManager.VPNManagerError.notWiredYet` in `start()` so the
+    expected gated state lands as `status = .disconnected` (gray
+    indicator in `StatusCard`) plus a calm `appendLog` line —
+    not as the red `.failed` state with a red `lastError` that
+    the catch-all branch produced. The catch-all is preserved
+    for genuine errors (invalid profile, network refusal,
+    etc.). The save side-effect inside `VPNManager.start`
+    already persists the profile into the App Group
+    `SharedConfigStore`; the user-visible message now matches:
+    *"VPN Mode is gated on Apple signing + NetworkExtension
+    entitlement. Selected profile saved to the shared
+    container; the tunnel comes online once signing lands."*
+  - `Sources/App/Views/ConnectView.swift`: softens the existing
+    pre-Start warning Label under the Mode picker. Previously
+    used `exclamationmark.triangle.fill` + `.orange`; now uses
+    `info.circle` + `.secondary`. Copy is also updated to
+    mention that the selected profile is already shared with
+    the extension. No layout change; no new view; no new state
+    fields.
+  - No new TunnelStatus case introduced. `.disconnected` is the
+    semantically-correct landing state for "user clicked Start
+    but signing is the blocker" — the StatusCard's gray
+    indicator + the existing `disclaimer` text (which already
+    says "VPN Mode architecture only. Real-device runtime
+    requires Apple signing…") are the right visual surface.
+- `docs/ROADMAP.md` Milestone 3.5 marked **done** under PR #1:
+  - Status line flipped from "not started" to **done** with the
+    date and PR link.
+  - All six tasks ticked `[x]` with per-task commit / stage
+    citations, except the **last task** (workflow assertions
+    of the v12 contract) which is intentionally left `[ ]` and
+    recorded under a new **Open follow-ups inside Milestone
+    3.5** subsection. That task is non-blocking — the v12
+    contract still holds implicitly through the project.yml
+    settings (no embed phase emitted, `-force_load` pulls the
+    static archive, API-only flag stays) — and the work is
+    promoted from "shipping requirement" to "CI hardening
+    follow-up that does not gate Milestone 4".
+  - A summary **Done** paragraph at the bottom of the
+    Milestone 3.5 section restates that all acceptance criteria
+    are met and points back at the per-stage TASK_LOG entries.
+  - Milestone 4 status line updated: from "not started.
+    Depends on Milestone 3." to "not started. **Code-side
+    prerequisites complete** (Milestone 3.5 done in PR #1).
+    Now **resource-blocked** on a paid Apple Developer account
+    + signing identity (Milestone 2), not code-blocked." Points
+    at the documented `CODE_SIGN_ENTITLEMENTS` attach lines in
+    `project.yml` as the entry path when signing arrives.
+- Hard scope reminder. The polish is UX-only. It does not
+  enable any tunnel runtime; `vpnManager.start` still throws
+  `VPNManagerError.notWiredYet` after persisting the config.
+  The user-visible distinction is "calm gated state" vs "red
+  error", nothing more. Unsigned CI build path is unchanged
+  end-to-end.
+- Files in this entry:
+    - `ios/OlcRTCClient/Sources/App/AppState.swift` (edited)
+    - `ios/OlcRTCClient/Sources/App/Views/ConnectView.swift` (edited)
+    - `docs/ROADMAP.md` (edited)
+    - `docs/ai/TASK_LOG.md` (this entry)
+- Follow-up commit on the `packet-tunnel-runtime-skeleton`
+  branch auto-updates [PR #1](https://github.com/artpm4250-png/olcrtc-ios/pull/1).
+  No new PR opened for the polish; it ships within Milestone
+  3.5's PR per the PR body's "Follow-up (will land on this
+  branch before merge)" section.
+
+---
+
 ### 2026-05-29 — Milestone 3.5 stage 4: LogsView ⇄ SharedLogStore mirror + unit tests, `packet-tunnel-runtime-skeleton`
 
 - Closes the last open thread in Milestone 3.5 by wiring the host

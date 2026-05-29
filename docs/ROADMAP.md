@@ -266,9 +266,13 @@ extension memory budget.
 
 ## Milestone 3.5 — `packet-tunnel-runtime-skeleton`
 
-**Status:** not started. Direct successor to Milestone 3 now that
-the build/link probe is green and the static-link architecture is
-recorded in [ADR-0013](ai/DECISIONS.md).
+**Status:** **done** (`2026-05-29`, [PR #1](https://github.com/artpm4250-png/olcrtc-ios/pull/1)).
+All acceptance criteria met under the unsigned CI path. Direct
+successor to Milestone 3; consumes [ADR-0013](ai/DECISIONS.md).
+One non-blocking follow-up — workflow-level assertions of the
+v12 contract — is recorded under "Open follow-ups" below; the
+contract still holds implicitly through the project.yml
+settings.
 
 **Goal:** wire the lifecycle skeleton between the host app and the
 `PacketTunnelProvider` extension *without* starting any olcRTC
@@ -281,7 +285,7 @@ work in Milestone 4.
 **Branch:** `packet-tunnel-runtime-skeleton`.
 
 **Tasks:**
-- [ ] Reintroduce the static-link settings on the
+- [x] Reintroduce the static-link settings on the
       `PacketTunnelProvider` target that the probe branch
       reverted in its merge-safety cleanup. The v12 form
       hard-coded `ios-arm64/` in `OTHER_LDFLAGS` and broke
@@ -300,31 +304,57 @@ work in Milestone 4.
       extension. CI workflows that exercise this branch must
       run `gomobile bind` before `xcodebuild` and check out
       submodules.
-- [ ] Define the shared config surface between the app and the
+      *Done in stage 1 (commit `aa9effe`) using sdk-aware
+      `OTHER_LDFLAGS[sdk=iphoneos*]` / `[sdk=iphonesimulator*]`.*
+- [x] Define the shared config surface between the app and the
       extension. Likely shape: app writes the selected
       `PacketTunnelConfig` into the App Group container (or
       Keychain for `keyHex`, per ADR-0010 follow-up) and the
       extension reads it from the same container during
       `startTunnel`. No new entitlements yet — App Group
       attachment lands when signing does.
-- [ ] Extend `PacketTunnelProvider.startTunnel(options:)` to:
+      *Done in stage 2 (commit `98773e0`):
+      `Sources/Shared/Services/SharedConfigStore.swift` writes
+      JSON to `<container>/packet-tunnel-config.json`;
+      entitlements remain declared-but-detached per ADR-0008.*
+- [x] Extend `PacketTunnelProvider.startTunnel(options:)` to:
       read the selected profile from the shared surface; validate
       it; log the resolved (sanitized) profile fields; return
       `notWiredYet` after logging. **No** `MobileStart*` /
       `MobileCheck` / `MobilePing`. **No** sockets. **No**
       `NEPacketTunnelNetworkSettings.setTunnelNetworkSettings`.
-- [ ] Implement `PacketTunnelProvider.stopTunnel(with:completionHandler:)`
+      *Done in stage 1 (decode from `providerConfiguration`) and
+      stage 2 (fallback to `SharedConfigStore.load()`). Hard
+      scope kept: `MobileSetDebug(false)` + `MobileIsRunning()`
+      via `GomobileExtensionProbe.touchNonStartingAPI()` only.*
+- [x] Implement `PacketTunnelProvider.stopTunnel(with:completionHandler:)`
       — clean teardown of any state the skeleton allocates (none
       yet from gomobile; just lifecycle scaffolding).
-- [ ] Mirror sanitized extension logs into the App Group so the
+      *Done in stage 1: symmetric, idempotent, sanitized log of
+      reason code.*
+- [x] Mirror sanitized extension logs into the App Group so the
       main app's Logs tab can show them end-to-end. Reuse the
       existing `LogSanitizer` (ADR-0010) — no new sanitization
       paths.
+      *Done in stages 2 + 3:
+      `Sources/Shared/Services/SharedLogStore.swift` provides
+      the append-only file (head-truncated at 64 KiB);
+      `PacketTunnelProvider.logSanitized` mirrors every line
+      through it; `AppState.mirrorExtensionLogs()` pulls and
+      content-dedupes into `logLines`; `LogsView.onAppear` and
+      `.refreshable` trigger the pull. Unit tests cover both
+      stores under temp-dir URLs.*
 - [ ] Update the probe / build workflows to keep asserting the
       v12 contract: gomobile static archive is linked into the
       `.appex` executable; no `OlcRTCMobile.framework` directory
       inside `.appex/Frameworks`; no `.xcframework` leak;
       `APPLICATION_EXTENSION_API_ONLY = YES` stays.
+      *Deferred — non-blocking. The contract still holds
+      implicitly via the project.yml settings (no embed phase
+      is emitted, `-force_load` pulls the archive, API-only flag
+      stays). Hardening this into explicit CI assertions is a
+      small follow-up that does not gate Milestone 4 — see the
+      "Open follow-ups" item below.*
 
 **Blockers:**
 - None for the skeleton itself — the architecture is locked in by
@@ -352,11 +382,36 @@ work in Milestone 4.
   [ADR-0008](ai/DECISIONS.md) and Milestone 4 — this milestone
   does not unblock VPN runtime, only the lifecycle skeleton.
 
+**Open follow-ups inside Milestone 3.5** (small, do not gate
+Milestone 4):
+- [ ] Fold the v12 contract assertions (no embedded
+      `OlcRTCMobile.framework` inside `.appex/Frameworks`, no
+      `.xcframework` leak, `nm -gU` shows `Mobile*` exports in
+      the `.appex` executable, `APPLICATION_EXTENSION_API_ONLY = YES`)
+      into `iOS App + Gomobile Build` after the build step, so a
+      future regression is caught loudly rather than relying on
+      the project.yml comments alone. Pattern lives in the
+      `packet-tunnel-gomobile-probe.yml` classifier — adapt and
+      promote, do not duplicate.
+
+**Done (2026-05-29, [PR #1](https://github.com/artpm4250-png/olcrtc-ios/pull/1)):**
+all acceptance criteria above are met under the unsigned CI
+path. Per-stage narrative lives in
+[`docs/ai/TASK_LOG.md`](ai/TASK_LOG.md) under the four
+Milestone 3.5 entries dated `2026-05-29`.
+
 ---
 
 ## Milestone 4 — Background-safe VPN runtime
 
-**Status:** not started. Depends on Milestone 3.
+**Status:** not started. **Code-side prerequisites complete**
+(Milestone 3.5 done in [PR #1](https://github.com/artpm4250-png/olcrtc-ios/pull/1)).
+Now **resource-blocked** on a paid Apple Developer account +
+signing identity (Milestone 2), not code-blocked. When signing
+lands, attaching `CODE_SIGN_ENTITLEMENTS` on both targets
+(exact lines documented in `ios/OlcRTCClient/project.yml`)
+plus the Milestone 4 task list below is the path to a working
+device tunnel.
 
 **Goal:** ship VPN Mode as a real iOS VPN. The user enables it from
 **Connect**, iOS pops the standard system VPN consent sheet, the

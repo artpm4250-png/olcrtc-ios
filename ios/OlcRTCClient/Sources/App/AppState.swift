@@ -124,6 +124,16 @@ final class AppState: ObservableObject {
                 status = .running(endpoint: endpoint)
                 appendLog("Local Proxy started at \(endpoint). Foreground only; iOS may suspend in background.")
             }
+        } catch VPNManager.VPNManagerError.notWiredYet {
+            // Expected gated state under the unsigned CI / pre-Milestone-4
+            // build path. VPNManager.start has already persisted the
+            // selected profile into the App Group SharedConfigStore;
+            // the only thing missing is the signed extension that would
+            // bring the tunnel up. Surface this calmly rather than as a
+            // red `.failed` error — that surface is for actionable
+            // failures (invalid profile, network refusal, etc.).
+            status = .disconnected
+            appendLog("VPN Mode is gated on Apple signing + NetworkExtension entitlement. Selected profile saved to the shared container; the tunnel comes online once signing lands. See About → VPN Mode.")
         } catch {
             status = .failed(reason: error.localizedDescription)
             lastError = error.localizedDescription

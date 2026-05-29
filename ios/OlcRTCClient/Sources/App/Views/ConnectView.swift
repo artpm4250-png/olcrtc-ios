@@ -33,14 +33,20 @@ struct ConnectView: View {
                         .foregroundStyle(.secondary)
 
                     if state.mode == .vpn {
-                        // VPN Mode is still a stub. Tell the user before
-                        // they try to Start.
+                        // VPN Mode lifecycle skeleton is in (Milestone 3.5):
+                        // selecting Start now persists the active
+                        // PacketTunnelConfig into the App Group shared
+                        // container. The actual tunnel runtime is gated
+                        // on Apple signing + the NetworkExtension
+                        // entitlement (Milestone 4). Surface this as a
+                        // calm informational row, not a loud warning —
+                        // nothing here is broken from the user's side.
                         Label(
-                            "VPN Mode is scaffold only until signing + provisioning + NetworkExtension entitlement are in place.",
-                            systemImage: "exclamationmark.triangle.fill"
+                            "VPN Mode runtime comes online once Apple signing + NetworkExtension entitlement are in place. The selected profile is already shared with the extension.",
+                            systemImage: "info.circle"
                         )
                         .font(.footnote)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(.secondary)
                     }
                 }
 
