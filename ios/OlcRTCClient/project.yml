@@ -106,6 +106,55 @@ targets:
         # future-signing reference and gets attached when a signing
         # identity is configured.
         APPLICATION_EXTENSION_API_ONLY: YES
+        # Framework search path for OlcRTCMobile.xcframework. Same value as
+        # the host app — both targets look in the same Frameworks/ dir.
+        FRAMEWORK_SEARCH_PATHS: $(inherited) $(PROJECT_DIR)/Frameworks
+        # Milestone 3.5 (branch `packet-tunnel-runtime-skeleton`), per
+        # ADR-0013. `OlcRTCMobile.xcframework` is a static framework
+        # wrapper (`.framework/<name>` is a `current ar archive`, not a
+        # Mach-O dylib). Embedding via `embed: true` is destructive
+        # (Xcode runs `builtin-copy -remove-static-executable` and
+        # injects a codeless stub — confirmed by probes v10/v11).
+        # Link-only without `-force_load` is also destructive
+        # (ld_prime's `-dead_strip` removes the unused-dylib load
+        # command — confirmed by probes v2–v9). The working shape is
+        # link-only + `-force_load` of the slice's static archive
+        # (probe v12, classification `PASS-STATIC-LINKED`).
+        #
+        # The v12 path was hard-coded to `ios-arm64/`, which works for
+        # the `iphoneos` Release generic build the probe ran, but
+        # breaks the simulator slice that `iOS App + Gomobile Build`
+        # also builds (`ld: warning: ignoring file …ios-arm64/… : fat
+        # file missing arch 'x86_64'`). Milestone 3.5 fixes that with
+        # sdk-aware variants: `OTHER_LDFLAGS[sdk=iphoneos*]` picks the
+        # `ios-arm64` slice, `OTHER_LDFLAGS[sdk=iphonesimulator*]`
+        # picks the `ios-arm64_x86_64-simulator` slice. Both keep
+        # `-lresolv` because the Go runtime references the BSD
+        # resolver symbols `_res_9_n{init,close,search}` regardless of
+        # slice.
+        #
+        # We deliberately do NOT use `-all_load`; force-load is scoped
+        # to the one archive that needs it.
+        "OTHER_LDFLAGS[sdk=iphoneos*]": $(inherited) -lresolv -force_load $(SRCROOT)/Frameworks/OlcRTCMobile.xcframework/ios-arm64/OlcRTCMobile.framework/OlcRTCMobile
+        "OTHER_LDFLAGS[sdk=iphonesimulator*]": $(inherited) -lresolv -force_load $(SRCROOT)/Frameworks/OlcRTCMobile.xcframework/ios-arm64_x86_64-simulator/OlcRTCMobile.framework/OlcRTCMobile
+    dependencies:
+      # `OlcRTCMobile.xcframework` is a static framework wrapper (see
+      # ADR-0013). Use a link-only dependency: XcodeGen adds the
+      # framework to *Link Binary With Libraries* and exposes its
+      # `Modules/` so `import OlcRTCMobile` resolves in the Swift
+      # compile step, but no Copy Files (Embed Frameworks) phase is
+      # generated for the extension. The actual symbol pull is done
+      # by `-force_load` in `OTHER_LDFLAGS[sdk=…]*` above. The
+      # extension `.appex` therefore has no `Frameworks/OlcRTCMobile.framework`
+      # directory at all (no codeless stub, nothing to inject into);
+      # the Go runtime's object files live inside the extension's
+      # own executable. `codeSign: false` keeps any residual copy
+      # step from trying to re-sign the framework under the unsigned
+      # CI path (`CODE_SIGNING_ALLOWED=NO`).
+      - framework: Frameworks/OlcRTCMobile.xcframework
+        embed: false
+        link: true
+        codeSign: false
   OlcRTCClientTests:
     type: bundle.unit-test
     platform: iOS

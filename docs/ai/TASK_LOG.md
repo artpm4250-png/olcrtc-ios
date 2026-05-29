@@ -9,6 +9,153 @@ Date format: `YYYY-MM-DD`. Each entry should answer **what** changed and
 
 ---
 
+### 2026-05-29 — Milestone 3.5 start: `packet-tunnel-runtime-skeleton` — reintroduce static-link settings (sdk-aware), wire `startTunnel` / `stopTunnel` skeleton
+
+- Branch: `packet-tunnel-runtime-skeleton`, started off the head of
+  `packet-tunnel-gomobile-probe` (after the v12 merge-safety cleanup).
+  This branches off probe rather than `main` because the probe branch
+  carries [ADR-0013](DECISIONS.md), the Milestone 3.5 section of
+  [`docs/ROADMAP.md`](../ROADMAP.md), and the v2–v12 probe history that
+  the runtime skeleton consumes — none of which are on `main` yet. When
+  probe merges, this branch rebases onto post-merge `main` cleanly.
+- PM decision recorded: Option 1 from the prior session
+  ("correct Milestone 3.5 minimum") was selected. The two rejected
+  alternatives were a literal interpretation of the original "Stage 1
+  Feasibility Probe" task (which would have rebuilt the v9-style
+  no-`-force_load` shape, classified `FAIL-STRIPPED-AFTER-LINK` by
+  v9 and `FAIL-NOT-LINKED` by v12 — i.e. green build but Mobile
+  symbols would not ship in the `.appex`, the exact "fake feasibility"
+  outcome ADR-0013 documents to prevent) and a documentation-only
+  retreat (no code change). Picking Option 1 means this milestone
+  applies ADR-0013, not relitigates it.
+- `ios/OlcRTCClient/project.yml`, `PacketTunnelProvider` target:
+  - `settings.base` gains `FRAMEWORK_SEARCH_PATHS:
+    $(inherited) $(PROJECT_DIR)/Frameworks` (same value as the host
+    app — both targets look in the same `Frameworks/` dir for the
+    gomobile xcframework).
+  - `settings.base` gains two sdk-aware `OTHER_LDFLAGS` variants
+    instead of one global value. The v12 probe hard-coded
+    `ios-arm64/OlcRTCMobile.framework/OlcRTCMobile` in
+    `OTHER_LDFLAGS`, which is the correct slice for `iphoneos`
+    Release builds but breaks `iOS App + Gomobile Build`'s
+    Debug `iphonesimulator` step with
+    `ld: warning: ignoring file …ios-arm64/…OlcRTCMobile: fat file
+    missing arch 'x86_64'`. The v12 merge-safety cleanup entry
+    explicitly listed this as the first thing the runtime branch
+    needed to fix. New values:
+    - `OTHER_LDFLAGS[sdk=iphoneos*]: $(inherited) -lresolv
+      -force_load
+      $(SRCROOT)/Frameworks/OlcRTCMobile.xcframework/ios-arm64/OlcRTCMobile.framework/OlcRTCMobile`
+    - `OTHER_LDFLAGS[sdk=iphonesimulator*]: $(inherited) -lresolv
+      -force_load
+      $(SRCROOT)/Frameworks/OlcRTCMobile.xcframework/ios-arm64_x86_64-simulator/OlcRTCMobile.framework/OlcRTCMobile`
+    Both keep `-lresolv` because the Go runtime references the BSD
+    resolver symbols `_res_9_n{init,close,search}` regardless of
+    slice (same reason the host app already has `-lresolv`).
+    `-force_load` is scoped to the one archive that needs it; we
+    deliberately do NOT use `-all_load`.
+  - `dependencies` gains a single new entry:
+    `framework: Frameworks/OlcRTCMobile.xcframework`,
+    `embed: false`, `link: true`, `codeSign: false`. The `link: true`
+    half is what makes XcodeGen expose the framework's `Modules/` to
+    the Swift compile step so `import OlcRTCMobile` resolves; the
+    actual symbol pull is done by `-force_load` above. `embed: false`
+    is required by ADR-0013 — embedding a static framework triggers
+    Xcode's `builtin-copy -remove-static-executable` and ends up
+    with a 40 KB codeless stub inside `.appex/Frameworks/` instead
+    of real Mobile symbols. `codeSign: false` keeps any residual
+    copy step from re-signing the framework under
+    `CODE_SIGNING_ALLOWED=NO`.
+  - `APPLICATION_EXTENSION_API_ONLY: YES` is kept. No change to the
+    host app target. No change to entitlements (signing is still
+    Milestone 2 / 4 work).
+  - `LLVM_LTO: NO` from probe v7/v8/v12 is deliberately NOT
+    reintroduced here. The v8 result entry classified the
+    LTO-off probe with the same `FAIL-STRIPPED-AFTER-LINK`
+    classification as the LTO-on probe, and the v12 PASS used the
+    default LTO setting alongside `-force_load`. So LTO is not the
+    lever — `-force_load` is. Skip the noise.
+- `ios/OlcRTCClient/Sources/PacketTunnelProvider/GomobileExtensionProbe.swift`
+  (new file). Same minimal shape as the v12 probe version, retitled
+  for Milestone 3.5: imports `OlcRTCMobile` under
+  `#if canImport(OlcRTCMobile)`, exposes
+  `GomobileExtensionProbe.touchNonStartingAPI() -> Bool` which calls
+  `MobileSetDebug(false)` then returns `MobileIsRunning()`. Both
+  symbols are configure-only / read-only; no `MobileStart*`, no
+  `MobileCheck`, no `MobilePing`, no sockets. The file's only job is
+  to give the Swift compile step an `import OlcRTCMobile` to resolve
+  against; the linker-side anchor is the `-force_load` above.
+- `ios/OlcRTCClient/Sources/PacketTunnelProvider/PacketTunnelProvider.swift`
+  rewritten from the `notWiredYet`-stub shape:
+  - `startTunnel(options:completionHandler:)` now does four things,
+    in order: (1) decodes `PacketTunnelConfig` from
+    `NETunnelProviderProtocol.providerConfiguration` (the host app
+    will eventually write the selected profile into
+    `providerConfiguration` via
+    `NETunnelProviderManager.saveToPreferences`; for now any caller
+    can pass it in); (2) sanitized-logs the resolved profile fields
+    through `LogSanitizer` (ADR-0010) so `keyHex` and `olcrtc://`
+    URIs are masked end-to-end; (3) calls
+    `GomobileExtensionProbe.touchNonStartingAPI()` to exercise the
+    static link edge at runtime, gated by `#if canImport(OlcRTCMobile)`;
+    (4) returns `StubError.notWiredYet`. No
+    `NEPacketTunnelNetworkSettings`, no `NEPacketTunnelFlow`, no
+    `setTunnelNetworkSettings` callback, no real tunnel. The
+    completion handler is invoked with the typed `notWiredYet` error
+    so the system reports the failure honestly and the host app's
+    `NEVPNStatusDidChange` observer can surface it. Two new typed
+    errors — `missingProviderConfiguration` and
+    `malformedProviderConfiguration` — cover the decode failure
+    paths so the operator can distinguish "no profile selected" from
+    "profile selected but unparseable" without reading the
+    extension's `os_log`.
+  - `stopTunnel(with:completionHandler:)` is symmetric — sanitized
+    log of the reason, then `completionHandler()`. Idempotent for
+    the current state because no Go runtime is started yet.
+  - `handleAppMessage` returns `nil` (unchanged from the stub).
+  - All log lines go through a single `logSanitized` helper that
+    runs the input through `LogSanitizer.sanitize` before
+    `os_log("%{public}@", …)`. This is the same sanitizer the host
+    app uses; we reuse it from `Sources/Shared/Services/` (already
+    compiled into both targets via the project.yml sources list).
+  - Decoder bridges the `[String: Any]` `providerConfiguration` to
+    `PacketTunnelConfig` via `JSONSerialization` →
+    `JSONDecoder.decode(PacketTunnelConfig.self, …)`. The shared
+    schema in
+    `Sources/PacketTunnelProvider/PacketTunnelConfig.swift` is the
+    contract; the host app encodes the same way when it lands the
+    `VPNManager.start(profile:)` work in Milestone 4.
+- Hard scope reminder. This is a build/link + lifecycle skeleton.
+  The extension reads the config and exercises the gomobile link
+  edge — that is what Milestone 3.5 is for — but it does NOT run any
+  olcRTC network code, does NOT call `MobileStart*` / `MobileCheck` /
+  `MobilePing`, does NOT open sockets, does NOT call
+  `setTunnelNetworkSettings`, and does NOT attach
+  `NEPacketTunnelFlow`. Real VPN runtime stays gated on Milestone 4
+  + signing. The unsigned CI path still produces an unsigned IPA per
+  ADR-0008; no installable VPN.
+- Files in this entry:
+  - `ios/OlcRTCClient/project.yml` (edited)
+  - `ios/OlcRTCClient/Sources/PacketTunnelProvider/GomobileExtensionProbe.swift` (new)
+  - `ios/OlcRTCClient/Sources/PacketTunnelProvider/PacketTunnelProvider.swift` (rewritten)
+  - `docs/ai/TASK_LOG.md` (this entry)
+- Workflows touched: none in this entry. `iOS App + Gomobile Build`
+  already runs `scripts/build-gomobile-ios.sh` before xcodebuild and
+  builds both `iphonesimulator` and `iphoneos`; the sdk-aware
+  `OTHER_LDFLAGS` is what keeps both legs green. `iOS Scaffold Build`
+  does not run `gomobile bind` and will continue to fail when the
+  extension's framework dependency cannot resolve — same baseline as
+  the host app's framework dependency, which is already on `main`;
+  this entry does not change that surface. The
+  `packet-tunnel-gomobile-probe.yml` workflow stays `workflow_dispatch`-only
+  per the v12 cleanup.
+- Verification deferred. No `xcodegen generate` / `xcodebuild build`
+  was run from this session (no Mac available; CI on
+  `iOS App + Gomobile Build` is the verification surface). Push the
+  branch to run the integrated workflow.
+
+---
+
 ### 2026-05-29 — Probe v12 cleanup: revert probe-only source/build mutations on `packet-tunnel-gomobile-probe`; isolate the probe workflow as manual-only
 
 - v12 proved the static-link model
