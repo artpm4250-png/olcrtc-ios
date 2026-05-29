@@ -130,7 +130,68 @@ These are tested automatically by `LogSanitizerTests` and
       artifact (24 h default retention). The repo has no release
       tags and no `gh release create` step.
 
-## 5. Known limitations (today)
+## 5. PacketTunnelProvider gomobile feasibility
+
+Captures the result of the build/link probe on branch
+`packet-tunnel-gomobile-probe`. This section is informational —
+the unsigned-IPA pipeline (§1) does not depend on the probe, and
+the probe does not produce a runtime that can be exercised on a
+device. It is here so a future signing pass knows which
+architectural shape to expect.
+
+- **Probe v12 result:** `PASS-STATIC-LINKED`
+  ([run 26634679085](https://github.com/artpm4250-png/olcrtc-ios/actions/runs/26634679085),
+  commit `6d180e7`).
+  - The `PacketTunnelProvider` extension target compiles, links,
+    and embeds correctly under
+    `APPLICATION_EXTENSION_API_ONLY = YES` with signing disabled.
+  - The final `PacketTunnelProvider` `.appex` executable is a
+    36 MB `Mach-O 64-bit executable arm64` and contains every
+    gomobile-bound `Mobile*` export defined by `mobile.go`
+    (`MobileStart`, `MobileStartWithTransport`,
+    `MobileIsRunning`, `MobileSetDebug`, `MobileCheck`,
+    `MobilePing`); `nm -u` reports no undefined `Mobile*`
+    references.
+  - There is **no** `OlcRTCMobile.framework` directory inside
+    `.appex/Frameworks/` and **no** `.xcframework` leak into
+    the `.app`.
+- **Static-link model (locked in by [ADR-0013](ai/DECISIONS.md)):**
+  - `gomobile bind -target=ios` emits
+    `OlcRTCMobile.xcframework` as a *static* framework wrapper
+    (`<slice>/OlcRTCMobile.framework/<binary>` is a
+    `current ar archive`, not a Mach-O dylib).
+  - The extension's framework dependency in `project.yml` is
+    `embed: false / link: true / codeSign: false`.
+  - The extension's `OTHER_LDFLAGS` carries
+    `$(inherited) -lresolv -force_load
+    $(SRCROOT)/Frameworks/OlcRTCMobile.xcframework/ios-arm64/OlcRTCMobile.framework/OlcRTCMobile`.
+    `-force_load` is scoped to that one archive (no `-all_load`).
+  - `APPLICATION_EXTENSION_API_ONLY = YES` stays enabled on the
+    extension target.
+  - Code signing and entitlements stay separate (ADR-0008); the
+    `.entitlements` files remain detached from the unsigned CI
+    build.
+- **No runtime yet.** `PacketTunnelProvider.startTunnel` calls
+  `GomobileExtensionProbe.touchNonStartingAPI()` (which only
+  runs `MobileSetDebug(false)` and `MobileIsRunning()`) and
+  immediately returns `StubError.notWiredYet`. The extension
+  does **not** call `MobileStart*`, `MobileCheck`, or
+  `MobilePing`; does **not** open sockets; does **not**
+  configure `NEPacketTunnelNetworkSettings`; does **not** touch
+  `NEPacketTunnelFlow`. Real lifecycle plumbing lands in
+  Milestone 3.5 (`packet-tunnel-runtime-skeleton`); the actual
+  VPN runtime lands in Milestone 4.
+- **Future signed-device QA required.** This probe covered
+  build, link, and bundle structure only — it does not say
+  anything about runtime behaviour, dyld load, extension memory
+  budget, or `NEPacketTunnelProvider` lifecycle on a real
+  iPhone. Each of those needs to be re-verified once a signing
+  identity, a provisioning profile scoped to the
+  `PacketTunnelProvider` bundle ID, and the
+  `com.apple.developer.networking.networkextension` entitlement
+  are configured (Milestone 2 of `ROADMAP.md`).
+
+## 6. Known limitations (today)
 
 These are deliberate, current-state limitations — not bugs. Each
 is captured in the roadmap as a planned future milestone.
@@ -141,10 +202,13 @@ is captured in the roadmap as a planned future milestone.
   ID, and the `com.apple.developer.networking.networkextension`
   entitlement. See ADR-0008 and Milestone 2 of the roadmap.
 - **`PacketTunnelProvider` runtime is stubbed.** The extension
-  target compiles, embeds, and exports the right
-  `NSExtensionPointIdentifier`, but its `startTunnel` immediately
-  fails with `VPNManagerError.notWiredYet`. It does **not** link
-  `OlcRTCMobile.xcframework` yet. See Milestone 3 of the roadmap.
+  target compiles, embeds, exports the right
+  `NSExtensionPointIdentifier`, and (per probe v12 — see §5)
+  links the gomobile static archive into its own executable
+  with `Mobile*` symbols present. But its `startTunnel` still
+  immediately fails with `StubError.notWiredYet`; the lifecycle
+  skeleton lands in Milestone 3.5 and the real VPN runtime
+  lands in Milestone 4 of the roadmap.
 - **Local Proxy Mode is foreground-only.** iOS suspends a
   foreground app's process in the background; the SOCKS endpoint
   stops accepting connections when that happens. This is iOS
@@ -160,7 +224,7 @@ is captured in the roadmap as a planned future milestone.
   strategy is captured in Milestone 5 — until that decision is
   made, the unsigned IPA is the only artifact.
 
-## 6. Sign-off
+## 7. Sign-off
 
 When all CI checks (§2) are green and §4 has been re-verified
 against the changed code, this checklist is considered satisfied

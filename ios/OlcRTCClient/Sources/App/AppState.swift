@@ -34,6 +34,11 @@ final class AppState: ObservableObject {
     private let sanitizer = LogSanitizer()
     private let validator = ProfileValidator()
     private let subscriptionImporter = SubscriptionImporter()
+    private let sharedLogStore = SharedLogStore()
+    /// Content-keyed set of extension log lines already mirrored into
+    /// `logLines`. Cleared alongside `logLines` in `clearLogs()` so
+    /// "Clear" actually re-pulls extension history on the next mirror.
+    private var mirroredExtensionLines: Set<String> = []
 
     #if !canImport(OlcRTCMobile)
     private let mock = MockOlcRTCService()
@@ -119,6 +124,16 @@ final class AppState: ObservableObject {
                 status = .running(endpoint: endpoint)
                 appendLog("Local Proxy started at \(endpoint). Foreground only; iOS may suspend in background.")
             }
+        } catch VPNManager.VPNManagerError.notWiredYet {
+            // Expected gated state under the unsigned CI / pre-Milestone-4
+            // build path. VPNManager.start has already persisted the
+            // selected profile into the App Group SharedConfigStore;
+            // the only thing missing is the signed extension that would
+            // bring the tunnel up. Surface this calmly rather than as a
+            // red `.failed` error — that surface is for actionable
+            // failures (invalid profile, network refusal, etc.).
+            status = .disconnected
+            appendLog("VPN Mode is gated on Apple signing + NetworkExtension entitlement. Selected profile saved to the shared container; the tunnel comes online once signing lands. See About → VPN Mode.")
         } catch {
             status = .failed(reason: error.localizedDescription)
             lastError = error.localizedDescription
@@ -328,6 +343,33 @@ final class AppState: ObservableObject {
 
     func clearLogs() {
         logLines.removeAll()
+        mirroredExtensionLines.removeAll()
+    }
+
+    /// Pulls sanitized log lines emitted by the `PacketTunnelProvider`
+    /// extension via the App Group `SharedLogStore` and appends any
+    /// previously-unseen lines to `logLines` (each one timestamped by
+    /// `appendLog`). Safe to call any number of times; a content-keyed
+    /// set dedupes lines already mirrored in this session, so
+    /// `LogsView.onAppear` and `.refreshable` can both invoke this
+    /// without producing duplicates. Edge case: if the extension
+    /// legitimately emits two identical sanitized lines in succession,
+    /// only the first survives the merge — acceptable trade-off given
+    /// the dominant case is unique lines.
+    ///
+    /// In the unsigned CI build path `SharedLogStore.readAll()` returns
+    /// `[]` because the App Group container is unavailable; this method
+    /// becomes a no-op without surfacing user-visible noise.
+    func mirrorExtensionLogs() {
+        let lines = sharedLogStore.readAll()
+        var added = 0
+        for line in lines where mirroredExtensionLines.insert(line).inserted {
+            appendLog(line)
+            added += 1
+        }
+        if added > 0 {
+            appendLog("[mirror] pulled \(added) new extension log line(s) from App Group")
+        }
     }
 
     // MARK: - Helpers
