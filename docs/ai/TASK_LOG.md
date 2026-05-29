@@ -9,6 +9,125 @@ Date format: `YYYY-MM-DD`. Each entry should answer **what** changed and
 
 ---
 
+### 2026-05-29 — Probe v9 result: classification = `FAIL-STRIPPED-AFTER-LINK` (real `startTunnel` entrypoint reference stripped too)
+
+- Run:
+  [`Packet Tunnel Gomobile Probe` 26631419682](https://github.com/artpm4250-png/olcrtc-ios/actions/runs/26631419682)
+  on commit
+  [`a316221`](https://github.com/artpm4250-png/olcrtc-ios/commit/a316221).
+  Conclusion: **failure**. Classifier wrote
+  `classification: FAIL-STRIPPED-AFTER-LINK`.
+- **Settings that held.**
+  - `APPLICATION_EXTENSION_API_ONLY=YES present in project.yml: 1`.
+    The new classifier check confirmed the extension-only API
+    constraint stayed on for the duration of v9.
+  - `compile invocations contain -flto=…: 0  (decisive — LTO is
+    actually compiling bitcode)`. LTO genuinely off, same as v7
+    and v8.
+  - `Ld step contains -object_path_lto: 1  (NOT decisive — Xcode
+    16.4 passes this regardless of LLVM_LTO)`. The split into
+    decisive/non-decisive LTO signals from v8 keeps working.
+- **Symbol facts.**
+  - Section A (final binary) — `otool -L` lists `libresolv.9.dylib`,
+    `Foundation`, `libobjc`, `libSystem`, `CoreFoundation`,
+    `NetworkExtension`, `Security`, and the swift dylibs. **No
+    `OlcRTCMobile.framework/OlcRTCMobile` entry.** The new
+    `otool -l | grep -A2 LC_LOAD_DYLIB` dump also shows the same
+    set of `LC_LOAD_DYLIB` load commands — none of them name
+    `OlcRTCMobile`. `nm -u | grep -E 'Mobile(IsRunning|SetDebug)'`
+    on the final binary returned `(none)`.
+  - Section B (intermediate `.o`) — `object file count: 11`,
+    `any Mobile(IsRunning|SetDebug) undef in any .o: 1`. The
+    `PacketTunnelProvider.o` (or its swiftc-generated `.o`)
+    carried `U _MobileIsRunning` and `U _MobileSetDebug` as
+    undefs. The Swift compiler did its job: the call site inside
+    `startTunnel` produced real symbol references in the object
+    file.
+  - Section C (captured Ld step):
+    `… -Os … -dead_strip -Xlinker -object_path_lto -Xlinker
+    …PacketTunnelProvider_lto.o … -e _NSExtensionMain
+    -fapplication-extension -fobjc-link-runtime … -lresolv
+    -framework OlcRTCMobile -o …PacketTunnelProvider`.
+    `-framework OlcRTCMobile` is *passed to ld*, `-dead_strip` is
+    on, `-Os` is on, and the entry point is `_NSExtensionMain`.
+    ld accepted `-framework OlcRTCMobile`, then dropped its load
+    command anyway because nothing it considers reachable
+    references it.
+- **Diagnosis.** Even with the gomobile references inside the
+  Swift body of `PacketTunnelProvider.startTunnel(options:
+  completionHandler:)` — a method that overrides
+  `NEPacketTunnelProvider.startTunnel`, whose principal class is
+  the extension's `NSExtensionPrincipalClass` — ld_prime's
+  `-dead_strip` is willing to nullify the call instructions and
+  drop `LC_LOAD_DYLIB` for `OlcRTCMobile`. The proximate cause is
+  ld's notion of "reachable from `-e _NSExtensionMain`": it sees
+  `_NSExtensionMain` as the only root, and *that* root is
+  defined inside `Foundation`, not inside this binary. From ld's
+  point of view the entire user-defined `PacketTunnelProvider`
+  class is only reachable via the Objective-C runtime's
+  `NSExtensionMain → NSExtensionPrincipalClass → +[class new]`
+  dispatch, which is a string lookup ld cannot statically prove.
+  ld therefore treats the `startTunnel` method body as
+  potentially dead, even though dyld + the extension contract
+  guarantee it will run. The Swift class itself survives because
+  Objective-C metadata keeps it pinned; the *call instructions
+  inside its methods* do not, because ld is doing instruction-
+  level reachability and the only "live" path it can prove to
+  those instructions is through reflection / runtime dispatch
+  it can't follow.
+  This is the same failure mode as v6–v8, just one layer up:
+  v6–v8 lost their anchor bodies, v9 loses the body of the
+  override of a virtual method. The `static` constructor in v8
+  was a more interesting near-miss than this; v9 confirms the
+  weakest assumption (`startTunnel` is "live enough") doesn't
+  hold either.
+- **Result for the option chain laid out at the end of v8.**
+  Option (a) — "make the reference live from a real runtime
+  entrypoint" — is now empirically refuted on Xcode 16.4 / iOS
+  18.5 SDK with `-dead_strip` and no signing. The remaining
+  lever is option (c): switch the extension's framework
+  dependency to `embed: true`. With `embed: true`, XcodeGen
+  emits a `Copy Files (Embed Frameworks)` build phase whose
+  output is `Frameworks/OlcRTCMobile.framework` inside the
+  `.appex`, and Xcode validates bundle-vs-load-command
+  consistency at that phase. ld_prime can't strip
+  `LC_LOAD_DYLIB` for a framework Xcode is going to embed —
+  the build phase would fail. The cost is duplication: ~33 MB
+  of Go runtime in both the host app's `Frameworks/` and the
+  extension's `Frameworks/`. That cost is acceptable for a
+  probe; v10 will pay it deliberately and report what changes.
+  Before v10 runs, the user's standing instruction in the v9
+  scope was to "stop to report first" if `embed: true` becomes
+  necessary, which is exactly the situation now.
+- Files unchanged on disk relative to `a316221`:
+  - `ios/OlcRTCClient/Sources/PacketTunnelProvider/PacketTunnelProvider.swift`
+    — unchanged. `startTunnel` still calls
+    `GomobileExtensionProbe.touchNonStartingAPI()` inside the
+    `#if canImport(OlcRTCMobile)` block, then returns
+    `StubError.notWiredYet`. No `MobileStart*`, no
+    `MobileCheck`, no `MobilePing`, no network work.
+  - `ios/OlcRTCClient/Sources/PacketTunnelProvider/GomobileExtensionProbe.swift`
+    — unchanged. The helper is still
+    `touchNonStartingAPI() -> Bool` calling `MobileSetDebug(false)`
+    then `MobileIsRunning()`.
+  - `ios/OlcRTCClient/project.yml` — unchanged.
+    `APPLICATION_EXTENSION_API_ONLY: YES`, `LLVM_LTO: NO`,
+    framework dependency `embed: false / codeSign: false / link:
+    true`, `OTHER_LDFLAGS: $(inherited) -lresolv`. Signing
+    disabled, entitlements detached.
+  - `.github/workflows/packet-tunnel-gomobile-probe.yml`
+    — unchanged. The v9 classifier (new
+    `FAIL-API-ONLY-OFF` class, `otool -l | grep -A2
+    LC_LOAD_DYLIB` diagnostic, retired
+    `OlcRTCExtensionGomobileLinkAnchor` / `OlcRTCGomobile`
+    greps) stays as-is for v10 to build on.
+- VPN runtime remains stubbed. `startTunnel` still returns
+  `StubError.notWiredYet`. The unsigned CI build path still
+  does not produce an installable VPN — see
+  [`docs/ai/DECISIONS.md`](DECISIONS.md) ADR-0008.
+
+---
+
 ### 2026-05-29 — Probe v9: real `startTunnel` entrypoint reference
 
 - v8 (entry below) confirmed that every artificial anchor we had
