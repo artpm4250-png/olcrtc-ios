@@ -9,6 +9,155 @@ Date format: `YYYY-MM-DD`. Each entry should answer **what** changed and
 
 ---
 
+### 2026-05-29 — Probe v8 result: classification = `FAIL-STRIPPED-AFTER-LINK` (constructor anchor did not survive either)
+
+- Run:
+  [`Packet Tunnel Gomobile Probe` 26630119909](https://github.com/artpm4250-png/olcrtc-ios/actions/runs/26630119909)
+  on commit
+  [`fff5749`](https://github.com/artpm4250-png/olcrtc-ios/commit/fff5749).
+  Conclusion: **failure**. Classifier wrote
+  `classification: FAIL-STRIPPED-AFTER-LINK`.
+- **Classifier fix worked as intended.** The new diagnostic
+  lines printed
+  `compile invocations contain -flto=…: 0  (decisive — LTO
+  is actually compiling bitcode)` and
+  `Ld step contains -object_path_lto: 1  (NOT decisive —
+  Xcode 16.4 passes this regardless of LLVM_LTO)`. The
+  classifier no longer reads either LTO signal; the
+  `FAIL-LTO-STILL-ENABLED` class is retired. `compile_has_flto = 0`
+  confirms `LLVM_LTO: NO` is genuinely off at the per-TU
+  compile stage and ends the LTO-still-on debate.
+- **Symbol facts.**
+  - Section B (intermediate `.o`) — same as v6 and v7:
+    `obj_count: 12`, `obj_has_mobile_refs: 1`. Both
+    `PacketTunnelProvider.o` and
+    `GomobileExtensionLinkAnchor.o` carry
+    `U _MobileIsRunning` and `U _MobileSetDebug`. The new
+    constructor function adds its own undef refs into the
+    same `.o`. clang did its job.
+  - Section A (final binary defined symbols):
+    ```
+    0000000100004020 T _OlcRTCExtensionGomobileLinkAnchor
+    0000000101cd99a0 b _OlcRTCGomobileBoolSink
+    ```
+    Only the linker-forced anchor symbol and the volatile
+    BOOL sink survive externally. The `static` constructor
+    `_OlcRTCExtensionGomobileConstructorAnchor` does not
+    appear in `nm` output, which is expected for a `static`
+    (file-local) function — `nm` without `-a` lists only
+    external symbols. The constructor's *pointer* should
+    have lived in `__DATA,__mod_init_func`, and the
+    *function body* in the text segment, regardless of its
+    linkage. Whether either survived in the final binary
+    cannot be answered from `nm` alone; the next iteration
+    needs to inspect `otool -l … -s __DATA __mod_init_func`
+    and disassemble the text range near
+    `_OlcRTCExtensionGomobileLinkAnchor` to confirm.
+  - Section A (final binary undef refs):
+    `nm -u | grep -E 'Mobile(IsRunning|SetDebug)'` → empty.
+  - `otool -L`: still no
+    `OlcRTCMobile.framework/OlcRTCMobile`.
+  - Captured Ld step (section C):
+    `… -dead_strip -Xlinker -object_path_lto -Xlinker
+    …_lto.o … -lresolv -Wl,-u,_OlcRTCExtensionGomobileLinkAnchor
+    -framework OlcRTCMobile -o …PacketTunnelProvider`.
+    `-dead_strip` present; `-flto=` absent from the per-TU
+    compile invocations (verified separately).
+- Diagnosis. ld_prime's regular dead-strip removes the
+  constructor function **and** its `__mod_init_func` entry
+  **and** the call instructions inside the linker-forced
+  anchor, despite:
+  - `__attribute__((constructor))` on the constructor,
+  - `__attribute__((used))` on the constructor and the
+    sink,
+  - `__attribute__((used, noinline, optnone))` on the
+    linker-forced anchor,
+  - `-Wl,-u,_OlcRTCExtensionGomobileLinkAnchor` keeping the
+    linker-forced anchor's external symbol.
+  The only intact symbols in the final binary are the
+  ones whose **storage** ld must preserve to satisfy
+  `-Wl,-u` (`_OlcRTCExtensionGomobileLinkAnchor`) or
+  `__attribute__((used))` on data (`OlcRTCGomobileBoolSink`).
+  Everything else — including the call instructions inside
+  the kept anchor function — was rewritten or removed.
+  This implies ld_prime is doing aggressive **function-body
+  level** stripping of relocations whose target dylibs would
+  otherwise have to be loaded, not merely dropping unused
+  dylibs. The expected mod_init_func protection of
+  constructors is **not** sufficient on Xcode 16.4 / iOS
+  18.5 SDK when the constructor is `static`.
+- The `static` on the constructor is the most likely
+  proximate cause for that anchor surviving as a no-op
+  rather than as a real call. A `static` function whose
+  only reference is the `__mod_init_func` entry is, from
+  ld's perspective, only reachable via dyld — and ld
+  appears to feel free to drop the function body (and
+  consequently the `MobileIsRunning` / `MobileSetDebug`
+  relocations inside it) if it determines the body has no
+  effect on any *external* (non-static) data. The volatile
+  store to `OlcRTCGomobileBoolSink` is an external `static`
+  data write, which ld may also consider unobservable from
+  outside the binary. In other words: ld is approximating
+  C's "as-if rule" on the resulting binary, not on a single
+  translation unit.
+- Implication for v9. Three concrete next moves, in order
+  of how much they perturb the build, all attacking the
+  ld-strips-the-relocations behavior more directly:
+  - (a) **Drop `static` from the constructor and from the
+    sink**, and add a global `__attribute__((used))` linker
+    symbol pointing at the constructor. ld then has an
+    external symbol it must keep, with the constructor's
+    body and its `MobileIsRunning` / `MobileSetDebug`
+    relocations attached. (Cheap, single-file change.)
+  - (b) **Inspect `__mod_init_func` and disassemble the
+    surviving anchor** in the v8 binary before deciding
+    on (a). `otool -l` + `otool -s __DATA __mod_init_func`
+    on the v8 build artifact would either show the
+    constructor's address (and a body of `ret` /
+    no-MobileIsRunning instructions) or no entry at all.
+    The Mach-O-level evidence will tell which way ld
+    actually decided to strip — and that determines whether
+    (a) is sufficient or whether (c) is needed. This is a
+    workflow change, not a probe change.
+  - (c) **Switch the framework dependency to `embed:
+    true`** on the extension target. XcodeGen then emits a
+    `Copy Files (Embed Frameworks)` build phase whose
+    output is the `Frameworks/OlcRTCMobile.framework`
+    inside the extension bundle. Xcode validates the
+    bundle-vs-load-command consistency at that phase, and
+    ld cannot drop `LC_LOAD_DYLIB` without breaking the
+    Copy Files step. Downside: the Go runtime is duplicated
+    in the host app's `Frameworks/` and the extension's
+    `Frameworks/` (~33 MB framework + the host-app linked-
+    in Go runtime), per the IPA inspection in the
+    `2026-05-28 — Validate unsigned IPA artifact structure`
+    entry. For a probe with no runtime work the duplication
+    is bounded and acceptable.
+- Files unchanged on disk relative to `fff5749`:
+  - `ios/OlcRTCClient/Sources/PacketTunnelProvider/GomobileExtensionLinkAnchor.m`
+    — unchanged. The constructor + the linker-forced anchor
+    + the shared `OlcRTCGomobileBoolSink` are still in
+    place; only the next probe will modify them.
+  - `ios/OlcRTCClient/project.yml` — unchanged.
+    `APPLICATION_EXTENSION_API_ONLY: YES`, `LLVM_LTO: NO`,
+    `OTHER_LDFLAGS: $(inherited) -lresolv -Wl,-u,_OlcRTCExtensionGomobileLinkAnchor`,
+    framework dependency `embed: false / codeSign: false / link: true`,
+    signing disabled, entitlements detached.
+  - `.github/workflows/packet-tunnel-gomobile-probe.yml`
+    — unchanged. The v8 classifier (dropped LTO class,
+    split LTO signals into decisive `-flto=` vs
+    non-decisive `-object_path_lto`) stays as-is for v9
+    to build on.
+  - `PacketTunnelProvider.swift` and
+    `GomobileExtensionProbe.swift` — unchanged.
+    `startTunnel` still fails fast with `notWiredYet`.
+- Probe v8 ends here. The next probe (v9) should start with
+  option (b) — disassemble the v8 binary to see exactly
+  what ld replaced the anchor bodies with — and then pick
+  (a) or (c) accordingly.
+
+---
+
 ### 2026-05-29 — Probe v8: `__attribute__((constructor))` anchor + fixed LTO classifier
 
 - v7's diagnosis (entry below) was that the link edge dies in
